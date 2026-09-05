@@ -33,10 +33,37 @@ for _stream in (sys.stdout, sys.stderr):
 
 from a2a.client import A2ACardResolver, ClientConfig, create_client
 from a2a.helpers import new_text_message
-from a2a.types import Role, SendMessageRequest
+from a2a.types import Role, SendMessageRequest, TaskState
 
 BASE = Path(__file__).resolve().parent
 CATALOG = BASE / "agents.json"
+
+# 服务端的 FAILED/CANCELED 必须传播到调用方：master 的自动编排全靠区分成败。
+_TERMINAL_BAD = {
+    TaskState.TASK_STATE_FAILED: "FAILED",
+    TaskState.TASK_STATE_CANCELED: "CANCELED",
+}
+
+
+class AgentTaskFailed(RuntimeError):
+    """远端任务落在失败终态；text 为可读原因（来自任务 artifact/status）。"""
+
+    def __init__(self, state: str, text: str) -> None:
+        super().__init__(f"[{state}] {text}")
+        self.state = state
+        self.text = text
+
+
+def finalize_reply(final_state: object, parts: list[str]) -> str:
+    """把(终态, 文本片段)收敛为结果：失败终态抛异常，其余返回文本。
+
+    旧实现只拼 artifact 文本、丢弃任务终态——服务端诚实的 FAILED 在客户端
+    变成 exit 0 的"正常输出"，master 会把错误文本当成功结果继续用。
+    """
+    text = "\n".join(parts) if parts else "(无文本回复)"
+    if final_state in _TERMINAL_BAD:
+        raise AgentTaskFailed(_TERMINAL_BAD[final_state], text)
+    return text
 
 
 def load_catalog() -> dict:
@@ -77,13 +104,18 @@ async def call_agent(
             metadata=meta or None,
         )
         parts: list[str] = []
+        final_state = None
         async for chunk in client.send_message(request):
-            for artifact in getattr(getattr(chunk, "task", None), "artifacts", []) or []:
+            task = getattr(chunk, "task", None)
+            status = getattr(task, "status", None)
+            if status is not None:
+                final_state = status.state
+            for artifact in getattr(task, "artifacts", []) or []:
                 for part in artifact.parts:
                     if getattr(part, "text", ""):
                         parts.append(part.text)
         await client.close()
-        return "\n".join(parts) if parts else "(无文本回复)"
+        return finalize_reply(final_state, parts)
     finally:
         await hc.aclose()
 
@@ -119,14 +151,21 @@ if __name__ == "__main__":
     if len(args) < 2:
         raise SystemExit('用法：python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>] [--cwd <目录>]\n      python a2a_call.py --list')
     agent_name, message = args[0], args[1]
-    reply = asyncio.run(
-        call_agent(
-            agent_name,
-            message,
-            streaming=use_stream,
-            model=model,
-            provider=provider,
-            cwd=cwd,
+    try:
+        reply = asyncio.run(
+            call_agent(
+                agent_name,
+                message,
+                streaming=use_stream,
+                model=model,
+                provider=provider,
+                cwd=cwd,
+            )
         )
-    )
+    except AgentTaskFailed as failure:
+        # 失败原因照常打印（调用方要看），但退出码必须非零——
+        # 让 shell 编排、CI 和 master 都能用 $? 分辨成败。
+        print(failure.text)
+        print(f"task state: {failure.state}", file=sys.stderr)
+        raise SystemExit(1) from None
     print(reply)
