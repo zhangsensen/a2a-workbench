@@ -41,9 +41,10 @@ class CodexExecutor(SubprocessAgentExecutor):
             )
         return cleaned
 
-    def _run(self, query: str, extra_args: list[str] | None = None) -> str:
+    def _run(self, query: str, extra_args: list[str] | None = None,
+             cwd_request: object = None) -> str:
         try:
-            return super()._run(query, extra_args)
+            return super()._run(query, extra_args, cwd_request)
         except ValueError as exc:
             # Oversized input is a definitive rejection, not a result: raise so
             # execute() records a retrievable FAILED terminal state instead of

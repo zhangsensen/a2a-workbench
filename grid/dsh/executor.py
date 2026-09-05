@@ -91,14 +91,17 @@ class DSHExecutor(SubprocessAgentExecutor):
     # taskkill /T /F guarantee is needed by pi/claude/codex, so keeping a
     # DSH-private copy would let the shared path silently regress.
 
-    def _run(self, query: str, extra_args: list[str] | None = None) -> str:
+    def _run(self, query: str, extra_args: list[str] | None = None,
+             cwd_request: object = None) -> str:
         """Run DSH with a short file-bridge task, avoiding cmd.exe's 8191 limit.
 
         ``extra_args``（模型选择等）暂不适用：dsh 的模型由 settings.yaml 的
         ``agent-default-model`` 决定，无单一 --model CLI 开关；传进来也忽略，
         避免用不确定的配置文件写入做并发不安全的全局改动。
+        ``cwd_request``（工作区钉定）适用：并行 worktree 派活的基础。
         """
         del extra_args  # 显式忽略模型选择（dsh 模型为配置驱动）
+        cwd = self._validated_cwd(cwd_request) or str(BASE)
         try:
             payload = self._sanitize_dsh(query)
         except ValueError as exc:
@@ -121,7 +124,7 @@ class DSHExecutor(SubprocessAgentExecutor):
                         shell=True,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        cwd=BASE,
+                        cwd=cwd,
                         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
                     )
                 else:
@@ -130,7 +133,7 @@ class DSHExecutor(SubprocessAgentExecutor):
                         [self.BIN, *self.ARGS_PREFIX, bridge],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        cwd=BASE,
+                        cwd=cwd,
                         start_new_session=True,
                     )
                 try:
@@ -153,7 +156,12 @@ class DSHExecutor(SubprocessAgentExecutor):
             ) from exc
 
         out = self._clip_output(stdout.decode("utf-8", errors="replace").strip())
+        err = stderr.decode("utf-8", errors="replace").strip()
+        # 与基类同一契约：非零退出码是失败，半截 stdout 不算成功答案。
+        if proc.returncode:
+            raise ExecutorFailure(
+                f"(退出码 {proc.returncode}) stderr: {err[:1000]}\nstdout: {out[:2000]}"
+            )
         if out:
             return out
-        err = stderr.decode("utf-8", errors="replace").strip()
         return f"(无输出) stderr: {err[:500]}"
