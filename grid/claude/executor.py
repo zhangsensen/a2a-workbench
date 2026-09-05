@@ -19,3 +19,5 @@ class ClaudeExecutor(SubprocessAgentExecutor):
     WORKING_TEXT = "claude 正在处理..."
     # claude -p 支持 --model 按会话指定模型；provider 走配置，无单一 CLI 开关，故不声明。
     MODEL_FLAG = "--model"
+    SESSION_ID_FLAG = "--session-id"
+    RESUME_FLAG = "--resume"

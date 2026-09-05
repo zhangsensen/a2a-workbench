@@ -89,7 +89,9 @@ echo "== rooms: rsync $REPO/rooms -> /root/a2a-rooms =="
 rsync -a --delete \
   --exclude .git --exclude data --exclude __pycache__ --exclude '*.pyc' \
   --exclude logs --exclude '*.db' --exclude '*.log' --exclude .pytest_cache \
+  --exclude VERSION --exclude .venv \
   "$REPO/rooms/" /root/a2a-rooms/
+printf '%s\n' "$STAMP" > /root/a2a-rooms/VERSION
 
 cat > /etc/systemd/system/a2a-rooms.service <<UNIT
 [Unit]

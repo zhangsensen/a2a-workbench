@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from room_agents import Member
-from settings import ROOT, DATA, PORT, BASE_URL
+from settings import ROOT, DATA, PORT, BASE_URL, VERSION
 from room_store import MEMBERS, RoomStore
 
 LOGGER = logging.getLogger('a2a-roundtable')
@@ -236,7 +236,7 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
         ready = bool(all_members) and all(m['processAlive'] and m['state'] in {'ready', 'busy'} for m in all_members)
         return {'serviceAlive': True, 'ready': ready, 'mode': 'persistent-roundtable',
                 'pid': os.getpid(), 'currentJob': discussion.current_id,
-                'queueSize': discussion.queue.qsize(), 'rooms': rooms}
+                'queueSize': discussion.queue.qsize(), 'rooms': rooms, 'version': VERSION}
 
     @app.get('/api/rooms')
     async def rooms():
@@ -401,7 +401,7 @@ def add_standard_a2a(app, discussion, data):
                 await updater.failed(message=updater.new_agent_message(parts=[Part(text=result['error'] or result['state'])]))
 
     card = AgentCard(name='常驻 A2A 圆桌', description='必须显式指定已有房间 contextId；先通过 /api/rooms 创建房间。任务读取/取消/订阅要求 X-A2A-Room 请求头。每房间独立原生会话。',
-        version='0.3.0', capabilities=AgentCapabilities(streaming=False, push_notifications=False),
+        version=VERSION, capabilities=AgentCapabilities(streaming=False, push_notifications=False),
         default_input_modes=['text'], default_output_modes=['text'],
         skills=[AgentSkill(id='roundtable', name='持续圆桌讨论', description='共享新增发言，各成员保留原生会话。metadata.members 指定成员，metadata.rounds 指定轮数。', tags=['roundtable','persistent','discussion'])],
         supported_interfaces=[AgentInterface(protocol_binding='JSONRPC', protocol_version='1.0', url=BASE_URL + '/a2a/jsonrpc'),

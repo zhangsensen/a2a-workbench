@@ -22,8 +22,11 @@ import asyncio
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -82,11 +85,83 @@ class SubprocessAgentExecutor(AgentExecutor):
     KILL_GRACE_SECONDS = 30  # 进程树终止后等待回收的上限
     WORKING_TEXT = "处理中..."
 
+    # 只有同时声明这两个开关的 CLI 才启用会话连续性。默认 None 保证不支持
+    # 原生会话的执行器完全沿用原来的调用方式。
+    SESSION_ID_FLAG: str | None = None
+    RESUME_FLAG: str | None = None
+
+    SESSION_DB_DIR: ClassVar[Path] = Path(__file__).resolve().parent / "data"
+    _sessions_db_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    # 同一 context 的原生会话不能被并发 resume。锁表由外层锁保护，实际
+    # context 锁在 asyncio.to_thread 的工作线程里持有，不阻塞事件循环。
+    _context_locks: ClassVar[dict[str, threading.Lock]] = {}
+    _context_locks_lock: ClassVar[threading.Lock] = threading.Lock()
+
     # 所有子类（尤其是有独立 _run 的 DSH）共享同一张运行表。entry 也由
     # execute 持有，因此 cancel 从表中取走它之后，execute 仍能看到
     # cancelled=True，避免再写 FAILED/COMPLETED 终态。
     _running_processes: ClassVar[dict[str, _ProcessEntry]] = {}
     _running_processes_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    # context 不是安全边界，只是会话路由键：服务仅监听回环，执行手本身拥有
+    # 全权限。这里的白名单用于拒绝歧义/失控的存储键，而不是权限隔离。
+    _CONTEXT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+    @classmethod
+    def _validated_context(cls, value: Any) -> str | None:
+        """校验会话路由键；缺省为 None，显式非法值响亮拒绝。"""
+        if value is None:
+            return None
+        if not isinstance(value, str) or not cls._CONTEXT_RE.fullmatch(value):
+            raise ExecutorFailure(
+                "(context 无效: 仅允许 1-64 位字母、数字、下划线或连字符)"
+            )
+        return value
+
+    @classmethod
+    def _context_lock(cls, context_id: str) -> threading.Lock:
+        with SubprocessAgentExecutor._context_locks_lock:
+            return SubprocessAgentExecutor._context_locks.setdefault(
+                context_id, threading.Lock()
+            )
+
+    @classmethod
+    def _session_db_path(cls) -> Path:
+        return cls.SESSION_DB_DIR / f"{cls.__name__.lower()}-sessions.db"
+
+    @classmethod
+    def _session_native_id(cls, context_id: str) -> str | None:
+        """读取 context 对应的 CLI 原生会话 id。"""
+        with SubprocessAgentExecutor._sessions_db_lock:
+            cls.SESSION_DB_DIR.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(cls._session_db_path()) as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS sessions "
+                    "(context TEXT PRIMARY KEY, native_id TEXT, updated REAL)"
+                )
+                row = db.execute(
+                    "SELECT native_id FROM sessions WHERE context = ?",
+                    (context_id,),
+                ).fetchone()
+        return row[0] if row is not None else None
+
+    @classmethod
+    def _store_session(cls, context_id: str, native_id: str) -> None:
+        """子进程成功后写入（或刷新）context 的原生会话 id。"""
+        with SubprocessAgentExecutor._sessions_db_lock:
+            cls.SESSION_DB_DIR.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(cls._session_db_path()) as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS sessions "
+                    "(context TEXT PRIMARY KEY, native_id TEXT, updated REAL)"
+                )
+                db.execute(
+                    "INSERT INTO sessions(context, native_id, updated) VALUES (?, ?, ?) "
+                    "ON CONFLICT(context) DO UPDATE SET "
+                    "native_id = excluded.native_id, updated = excluded.updated",
+                    (context_id, native_id, time.time()),
+                )
 
     @classmethod
     def _register_process(
@@ -323,6 +398,62 @@ class SubprocessAgentExecutor(AgentExecutor):
             return out
         return f"(无输出) stderr: {err[:500]}"
 
+    def _run_with_session(
+        self,
+        query: str,
+        extra_args: list[str],
+        cwd_request: Any,
+        context_id: str | None,
+        context_reset: bool,
+        task_id: str | None,
+        entry: _ProcessEntry,
+    ) -> str:
+        """在同步工作线程中完成会话选路、串行执行与成功后持久化。"""
+        if context_id is None or not (self.SESSION_ID_FLAG and self.RESUME_FLAG):
+            return self._run(
+                query, extra_args, cwd_request, task_id, entry
+            )
+
+        with self._context_lock(context_id):
+            native_id = (
+                None if context_reset else self._session_native_id(context_id)
+            )
+            is_resume = native_id is not None
+            if native_id is None:
+                native_id = str(uuid.uuid4())
+                session_args = [self.SESSION_ID_FLAG, native_id]
+            else:
+                session_args = [self.RESUME_FLAG, native_id]
+
+            try:
+                result = self._run(
+                    query,
+                    [*extra_args, *session_args],
+                    cwd_request,
+                    task_id,
+                    entry,
+                )
+            except ExecutorTimeout:
+                # 超时不代表会话失效：换新会话重试只会再烧一轮 TIMEOUT，
+                # 且任务本身可能有副作用。直接上抛，让调用方决定。
+                raise
+            except ExecutorFailure:
+                # 原生 CLI 的历史会话可能已被人工清理。resume 失败时只重试
+                # 一次全新会话；新建路径（含 contextReset）失败则直接上抛。
+                if not is_resume or entry.cancelled:
+                    raise
+                native_id = str(uuid.uuid4())
+                result = self._run(
+                    query,
+                    [*extra_args, self.SESSION_ID_FLAG, native_id],
+                    cwd_request,
+                    task_id,
+                    entry,
+                )
+
+            self._store_session(context_id, native_id)
+            return result
+
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         if context.current_task:
             task = context.current_task
@@ -336,15 +467,25 @@ class SubprocessAgentExecutor(AgentExecutor):
             message=new_text_message(self.WORKING_TEXT),
         )
 
-        query = get_message_text(context.message)
-        # 执行器层透传：请求元数据（如 model/provider）→ 追加到命令参数；
-        # cwd 原样传入 _run，由 _validated_cwd 决定接受或响亮拒绝。
-        extra_args = self._executor_args_from_metadata(context.metadata)
-        cwd_request = context.metadata.get("cwd") if isinstance(context.metadata, dict) else None
         entry = _ProcessEntry()
         try:
+            query = get_message_text(context.message)
+            metadata = context.metadata if isinstance(context.metadata, dict) else {}
+            # 执行器层透传：请求元数据（如 model/provider）→ 追加到命令参数；
+            # cwd 原样传入 _run，由 _validated_cwd 决定接受或响亮拒绝。
+            extra_args = self._executor_args_from_metadata(metadata)
+            cwd_request = metadata.get("cwd")
+            context_id = self._validated_context(metadata.get("context"))
+            context_reset = metadata.get("contextReset") == "1"
             result = await asyncio.to_thread(
-                self._run, query, extra_args, cwd_request, task.id, entry
+                self._run_with_session,
+                query,
+                extra_args,
+                cwd_request,
+                context_id,
+                context_reset,
+                task.id,
+                entry,
             )
         except ExecutorFailure as failure:
             if entry.cancelled:

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from room_store import RoomStore
 from roundtable import Discussion, create_app
+from settings import VERSION
 
 
 class FakeMember:
@@ -114,6 +115,7 @@ def test_cancel_stops_active_turn_and_queue_continues(tmp_path):
 def test_http_host_origin_and_a2a_card(tmp_path):
     with TestClient(create_app(tmp_path,FakeMember)) as client:
         assert client.get('/healthz').json()['ready']
+        assert client.get('/healthz').json()['version']==VERSION
         assert client.get('/.well-known/agent-card.json').status_code==200
         assert client.get('/healthz',headers={'Host':'evil.example'}).status_code==403
         assert client.post('/api/rooms/lobby/messages',headers={'Origin':'https://evil.example'},json={'text':'blocked'}).status_code==403
