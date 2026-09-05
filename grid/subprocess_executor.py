@@ -23,8 +23,10 @@ import os
 import re
 import signal
 import subprocess
+import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from a2a.helpers import (
     get_message_text,
@@ -63,6 +65,14 @@ class ExecutorTimeout(ExecutorFailure):
     """子进程超时，且进程树已被终止。"""
 
 
+@dataclass
+class _ProcessEntry:
+    """一次 execute 调用与其子进程之间共享的取消状态。"""
+
+    process: "subprocess.Popen[bytes] | None" = None
+    cancelled: bool = False
+
+
 class SubprocessAgentExecutor(AgentExecutor):
     BIN = ""                 # 子类声明：可执行文件路径
     ARGS_PREFIX: list[str] = []   # 子类声明：命令前缀参数
@@ -71,6 +81,46 @@ class SubprocessAgentExecutor(AgentExecutor):
     TIMEOUT = 600
     KILL_GRACE_SECONDS = 30  # 进程树终止后等待回收的上限
     WORKING_TEXT = "处理中..."
+
+    # 所有子类（尤其是有独立 _run 的 DSH）共享同一张运行表。entry 也由
+    # execute 持有，因此 cancel 从表中取走它之后，execute 仍能看到
+    # cancelled=True，避免再写 FAILED/COMPLETED 终态。
+    _running_processes: ClassVar[dict[str, _ProcessEntry]] = {}
+    _running_processes_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def _register_process(
+        cls,
+        task_id: str | None,
+        process: "subprocess.Popen[bytes]",
+        entry: _ProcessEntry,
+    ) -> None:
+        """Popen 成功后才把进程发布给 cancel。"""
+        entry.process = process
+        if task_id is None:
+            return
+        with SubprocessAgentExecutor._running_processes_lock:
+            SubprocessAgentExecutor._running_processes[task_id] = entry
+
+    @classmethod
+    def _take_process(
+        cls,
+        task_id: str | None,
+        *,
+        expected: _ProcessEntry | None = None,
+        cancelled: bool = False,
+    ) -> _ProcessEntry | None:
+        """原子取走运行条目；自然结束和 cancel 只会有一方成功。"""
+        if task_id is None:
+            return None
+        with SubprocessAgentExecutor._running_processes_lock:
+            entry = SubprocessAgentExecutor._running_processes.get(task_id)
+            if entry is None or (expected is not None and entry is not expected):
+                return None
+            entry = SubprocessAgentExecutor._running_processes.pop(task_id)
+            if cancelled:
+                entry.cancelled = True
+            return entry
 
     def _sanitize(self, text: str) -> str:
         """去控制字符 + 限长，防异常输入。"""
@@ -222,7 +272,8 @@ class SubprocessAgentExecutor(AgentExecutor):
         return str(path)
 
     def _run(self, query: str, extra_args: list[str] | None = None,
-             cwd_request: Any = None) -> str:
+             cwd_request: Any = None, task_id: str | None = None,
+             entry: _ProcessEntry | None = None) -> str:
         """同步执行子进程，返回文本结果（在 asyncio.to_thread 里跑）。
 
         失败一律抛 ``ExecutorFailure``，由 ``execute`` 落成 FAILED 终态。
@@ -237,18 +288,27 @@ class SubprocessAgentExecutor(AgentExecutor):
         except Exception as e:  # noqa: BLE001
             raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
 
+        run_entry = entry if entry is not None else _ProcessEntry()
+        self._register_process(task_id, proc, run_entry)
         try:
-            stdout, stderr = proc.communicate(
-                input=stdin_payload, timeout=self.TIMEOUT
-            )
-        except subprocess.TimeoutExpired:
-            self._kill_process_tree(proc)
-            self._reap_after_kill(proc)
-            raise ExecutorTimeout(f"(调用超时 >{self.TIMEOUT}s)") from None
-        except Exception as e:  # noqa: BLE001
-            self._kill_process_tree(proc)
-            self._reap_after_kill(proc)
-            raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
+            try:
+                stdout, stderr = proc.communicate(
+                    input=stdin_payload, timeout=self.TIMEOUT
+                )
+            except subprocess.TimeoutExpired:
+                if not run_entry.cancelled:
+                    self._kill_process_tree(proc)
+                    self._reap_after_kill(proc)
+                raise ExecutorTimeout(f"(调用超时 >{self.TIMEOUT}s)") from None
+            except Exception as e:  # noqa: BLE001
+                if not run_entry.cancelled:
+                    self._kill_process_tree(proc)
+                    self._reap_after_kill(proc)
+                raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
+        finally:
+            # 若 cancel 已先取走条目，这里得到 None；本地 run_entry 仍保留其
+            # cancelled 标志，供 execute 在 asyncio.to_thread 返回后检查。
+            self._take_process(task_id, expected=run_entry)
 
         out = self._clip_output(stdout.decode("utf-8", errors="replace").strip())
         err = stderr.decode("utf-8", errors="replace").strip()
@@ -281,9 +341,14 @@ class SubprocessAgentExecutor(AgentExecutor):
         # cwd 原样传入 _run，由 _validated_cwd 决定接受或响亮拒绝。
         extra_args = self._executor_args_from_metadata(context.metadata)
         cwd_request = context.metadata.get("cwd") if isinstance(context.metadata, dict) else None
+        entry = _ProcessEntry()
         try:
-            result = await asyncio.to_thread(self._run, query, extra_args, cwd_request)
+            result = await asyncio.to_thread(
+                self._run, query, extra_args, cwd_request, task.id, entry
+            )
         except ExecutorFailure as failure:
+            if entry.cancelled:
+                return
             # 终态可取回：原因既写成 artifact，也写进 status message，
             # 状态是诚实的 FAILED。
             await updater.add_artifact(parts=[new_text_part(text=failure.text)])
@@ -293,6 +358,8 @@ class SubprocessAgentExecutor(AgentExecutor):
             )
             return
         except Exception as exc:  # noqa: BLE001
+            if entry.cancelled:
+                return
             # 任何未预期异常也必须落终态：否则任务永远停在 WORKING，
             # 调用方既拿不到结果也不知道该不该重试（执行器被无限占用）。
             text = f"(内部错误: {type(exc).__name__}: {exc})"
@@ -303,6 +370,8 @@ class SubprocessAgentExecutor(AgentExecutor):
             )
             return
 
+        if entry.cancelled:
+            return
         await updater.add_artifact(parts=[new_text_part(text=result)])
         await updater.update_status(
             state=TaskState.TASK_STATE_COMPLETED,
@@ -356,4 +425,22 @@ class SubprocessAgentExecutor(AgentExecutor):
         return args
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        raise NotImplementedError("cancel not supported")
+        entry = self._take_process(context.task_id, cancelled=True)
+        if entry is None:
+            # 已自然结束，或尚未启动子进程；两种情况都不制造第二个终态。
+            return
+
+        process = entry.process
+        if process is not None:
+            await asyncio.to_thread(self._kill_process_tree, process)
+            await asyncio.to_thread(self._reap_after_kill, process)
+
+        updater = TaskUpdater(
+            event_queue=event_queue,
+            task_id=context.task_id,
+            context_id=context.context_id,
+        )
+        await updater.update_status(
+            state=TaskState.TASK_STATE_CANCELED,
+            message=new_text_message("已取消"),
+        )

@@ -16,6 +16,7 @@ from subprocess_executor import (
     ExecutorTimeout,
     IS_WINDOWS,
     SubprocessAgentExecutor,
+    _ProcessEntry,
 )
 
 MAX_DSH_INPUT_BYTES = 1_048_576
@@ -92,7 +93,8 @@ class DSHExecutor(SubprocessAgentExecutor):
     # DSH-private copy would let the shared path silently regress.
 
     def _run(self, query: str, extra_args: list[str] | None = None,
-             cwd_request: object = None) -> str:
+             cwd_request: object = None, task_id: str | None = None,
+             entry: _ProcessEntry | None = None) -> str:
         """Run DSH with a short file-bridge task, avoiding cmd.exe's 8191 limit.
 
         ``extra_args``（模型选择等）暂不适用：dsh 的模型由 settings.yaml 的
@@ -136,18 +138,24 @@ class DSHExecutor(SubprocessAgentExecutor):
                         cwd=cwd,
                         start_new_session=True,
                     )
+                run_entry = entry if entry is not None else _ProcessEntry()
+                self._register_process(task_id, proc, run_entry)
                 try:
-                    stdout, stderr = proc.communicate(timeout=self.TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    self._kill_process_tree(proc)
-                    # _reap_after_kill deliberately never calls communicate()
-                    # without a timeout: if the cmd shim dies but a node
-                    # descendant survives, inherited pipe handles can keep it
-                    # blocked forever.
-                    self._reap_after_kill(proc)
-                    raise ExecutorTimeout(
-                        f"(调用超时 >{self.TIMEOUT}s)"
-                    ) from None
+                    try:
+                        stdout, stderr = proc.communicate(timeout=self.TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        if not run_entry.cancelled:
+                            self._kill_process_tree(proc)
+                            # _reap_after_kill deliberately never calls communicate()
+                            # without a timeout: if the cmd shim dies but a node
+                            # descendant survives, inherited pipe handles can keep it
+                            # blocked forever.
+                            self._reap_after_kill(proc)
+                        raise ExecutorTimeout(
+                            f"(调用超时 >{self.TIMEOUT}s)"
+                        ) from None
+                finally:
+                    self._take_process(task_id, expected=run_entry)
         except ExecutorFailure:
             raise
         except Exception as exc:  # noqa: BLE001

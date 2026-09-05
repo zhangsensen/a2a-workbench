@@ -9,12 +9,14 @@ const el = (tag, text, cls) => {
 let room = new URL(location.href).searchParams.get('room') || sessionStorage.getItem('a2a-selected-room') || null;
 let refreshing = null;
 let generation = 0, rooms = [], lastMessages = '', lastMembers = '', lastRooms = '';
+let memberRoster = [];
 const states = new Map();
+const displayName = name => name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 function state(id) {
   if (!states.has(id)) {
     let draft = {};
     try { draft = JSON.parse(sessionStorage.getItem('a2a-draft:' + id) || '{}'); } catch (_) {}
-    states.set(id, {text: draft.text || '', members: draft.members || ['codex', 'claude', 'zcode'],
+    states.set(id, {text: draft.text || '', members: draft.members || [...memberRoster],
       rounds: draft.rounds || 1, jobs: [], sending: false, loaded: false, notice: '', revision: 0});
   }
   return states.get(id);
@@ -91,6 +93,7 @@ async function refresh() {
     ]);
     if (ticket !== generation || target !== room) return;
     rooms = inventory; renderRooms();
+    memberRoster = (health.rooms?.find(r => r.id === target) || health.rooms?.[0])?.members.map(m => m.name) || memberRoster;
     $('#service').textContent = health.serviceAlive ? '服务常驻运行' : '服务异常';
     if (!target) { $('#title').textContent = '选择一个讨论室'; controls(); return; }
     for (const result of [status, messages, jobs]) if (result.requestError) throw result.requestError;
@@ -103,7 +106,7 @@ async function refresh() {
       $('#members').replaceChildren(...status.members.map(m => {
         const n = el('div', undefined, 'member');
         n.append(el('span', undefined, 'dot' + (!m.processAlive || m.state === 'error' ? ' bad' : m.state === 'busy' ? ' busy' : '')),
-          el('strong', m.name === 'zcode' ? 'ZCode' : m.name === 'codex' ? 'Codex' : 'Claude'),
+          el('strong', displayName(m.name)),
           el('div', m.state === 'busy' ? '正在发言' : m.processAlive && m.state === 'ready' ? `待命 · 已完成 ${m.turns} 次发言` : '需要处理'));
         const details = el('details');
         details.append(el('summary', m.model || '会话信息'), el('div', '所属房间：' + target),
