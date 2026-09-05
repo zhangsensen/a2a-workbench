@@ -35,7 +35,8 @@ class RoomStore:
                     last_error TEXT, updated REAL, PRIMARY KEY(room,name));
                 CREATE TABLE IF NOT EXISTS events (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL,
-                    speaker TEXT NOT NULL, text TEXT NOT NULL, job TEXT, created REAL NOT NULL);
+                    speaker TEXT NOT NULL, text TEXT NOT NULL, job TEXT, created REAL NOT NULL,
+                    metadata TEXT);
                 CREATE INDEX IF NOT EXISTS room_events ON events(room,seq);
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY, room TEXT NOT NULL, prompt TEXT NOT NULL,
@@ -46,6 +47,10 @@ class RoomStore:
                     goal TEXT NOT NULL, summary TEXT NOT NULL,
                     open_questions TEXT NOT NULL, next_action TEXT NOT NULL,
                     through_seq INTEGER NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS execution_attempts (
+                    job TEXT NOT NULL, attempt INTEGER NOT NULL, endpoint TEXT NOT NULL,
+                    remote_task_id TEXT, state TEXT NOT NULL, created REAL NOT NULL,
+                    updated REAL NOT NULL, PRIMARY KEY(job,attempt));
             """)
             if 'attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(members)')}:
                 db.execute('ALTER TABLE members ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
@@ -59,6 +64,10 @@ class RoomStore:
                 db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'discuss'")
             if 'executor' not in job_columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN executor TEXT')
+            if 'cwd' not in job_columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN cwd TEXT')
+            if 'metadata' not in {r['name'] for r in db.execute('PRAGMA table_info(events)')}:
+                db.execute('ALTER TABLE events ADD COLUMN metadata TEXT')
         path.chmod(0o600)
 
     @contextmanager
@@ -159,7 +168,7 @@ class RoomStore:
             db.execute("INSERT INTO jobs(id,room,prompt,members,rounds,state,error,created,updated,speaker) VALUES (?,?,?,?,?,'queued',NULL,?,?,?)", (key, room, prompt, json.dumps(members), rounds, now, now, speaker))
         return self.job(key)
 
-    def submit_execute(self, room, prompt, executor, key, speaker='master'):
+    def submit_execute(self, room, prompt, executor, key, speaker='master', cwd=None):
         current = self.room(room)
         if current['archived_at'] is not None:
             self.unarchive_room(room)  # New activity automatically revives an archived room.
@@ -171,19 +180,65 @@ class RoomStore:
             raise ValueError('Request ID is required')
         if speaker not in {'user', 'master'}:
             raise ValueError('Invalid scheduling speaker')
+        if cwd is not None:
+            if not isinstance(cwd, str) or not cwd.strip():
+                raise ValueError('cwd must be a nonempty string')
+            cwd = cwd.strip()
         with self.connect() as db:
             previous = db.execute('SELECT * FROM jobs WHERE id=?', (key,)).fetchone()
             if previous:
-                old = (previous['room'], previous['prompt'], previous['executor'], previous['speaker'], previous['kind'])
-                if old != (room, prompt, executor, speaker, 'execute'):
+                old = (previous['room'], previous['prompt'], previous['executor'], previous['speaker'], previous['kind'], previous['cwd'])
+                if old != (room, prompt, executor, speaker, 'execute', cwd):
                     raise ValueError('Request ID already used for different content')
                 return self.job(key)
             now = time.time()
             db.execute("""INSERT INTO jobs(
-                id,room,prompt,members,rounds,state,error,created,updated,speaker,kind,executor
-                ) VALUES (?,?,?,'[]',1,'queued',NULL,?,?,?,'execute',?)""",
-                (key, room, prompt, now, now, speaker, executor))
+                id,room,prompt,members,rounds,state,error,created,updated,speaker,kind,executor,cwd
+                ) VALUES (?,?,?,'[]',1,'queued',NULL,?,?,?,'execute',?,?)""",
+                (key, room, prompt, now, now, speaker, executor, cwd))
         return self.job(key)
+
+    def add_attempt(self, job, endpoint):
+        now = time.time()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute("SELECT 1 FROM jobs WHERE id=? AND kind='execute'", (job,)).fetchone():
+                raise KeyError(job)
+            attempt = db.execute(
+                'SELECT COALESCE(MAX(attempt),0)+1 AS attempt FROM execution_attempts WHERE job=?',
+                (job,),
+            ).fetchone()['attempt']
+            db.execute(
+                "INSERT INTO execution_attempts(job,attempt,endpoint,remote_task_id,state,created,updated) VALUES (?,?,?,NULL,'running',?,?)",
+                (job, attempt, endpoint, now, now),
+            )
+        return attempt
+
+    def set_attempt_remote(self, job, attempt, remote_task_id):
+        with self.connect() as db:
+            result = db.execute(
+                'UPDATE execution_attempts SET remote_task_id=?,updated=? WHERE job=? AND attempt=?',
+                (remote_task_id, time.time(), job, attempt),
+            )
+            if not result.rowcount:
+                raise KeyError((job, attempt))
+
+    def set_attempt_state(self, job, attempt, state):
+        with self.connect() as db:
+            result = db.execute(
+                'UPDATE execution_attempts SET state=?,updated=? WHERE job=? AND attempt=?',
+                (state, time.time(), job, attempt),
+            )
+            if not result.rowcount:
+                raise KeyError((job, attempt))
+
+    def latest_attempt(self, job):
+        with self.connect() as db:
+            row = db.execute(
+                'SELECT * FROM execution_attempts WHERE job=? ORDER BY attempt DESC LIMIT 1',
+                (job,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def job(self, key, room=None):
         with self.connect() as db:
@@ -285,22 +340,78 @@ class RoomStore:
         with self.connect() as db:
             db.execute("UPDATE jobs SET state=?,error=?,updated=? WHERE id=?", (state, error, time.time(), key))
 
-    def finish_execute(self, key, state, text, error=None):
+    def finish_if(self, key, from_states, state, error=None):
+        states = tuple(from_states)
+        if not states:
+            return False
+        placeholders = ','.join('?' for _ in states)
+        with self.connect() as db:
+            result = db.execute(
+                f'UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state IN ({placeholders})',
+                (state, error, time.time(), key, *states),
+            )
+            return bool(result.rowcount)
+
+    def request_cancel(self, key):
+        with self.connect() as db:
+            result = db.execute(
+                "UPDATE jobs SET state='cancel_requested',error=NULL,updated=? "
+                "WHERE id=? AND kind='execute' AND state IN ('queued','running','cancel_requested','outcome_unknown')",
+                (time.time(), key),
+            )
+            return bool(result.rowcount)
+
+    def finish_execute(self, key, state, text, error=None, metadata=None):
         if state not in {'completed', 'failed'}:
             raise ValueError('Invalid execution terminal state')
+        encoded_metadata = (
+            metadata if isinstance(metadata, str)
+            else None if metadata is None
+            else json.dumps(metadata, ensure_ascii=False)
+        )
         with self.connect() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=? AND kind='execute' AND state='running'", (key,)).fetchone()
+            row = db.execute(
+                "SELECT * FROM jobs WHERE id=? AND kind='execute' "
+                "AND state IN ('running','cancel_requested','outcome_unknown')",
+                (key,),
+            ).fetchone()
             if not row:
                 return False
-            db.execute('INSERT INTO events(room,speaker,text,job,created) VALUES (?,?,?,?,?)',
-                       (row['room'], 'exec:' + row['executor'], text, key, time.time()))
+            db.execute('INSERT INTO events(room,speaker,text,job,created,metadata) VALUES (?,?,?,?,?,?)',
+                       (row['room'], 'exec:' + row['executor'], text, key, time.time(), encoded_metadata))
             db.execute('UPDATE jobs SET state=?,error=?,updated=? WHERE id=?',
                        (state, error, time.time(), key))
         return True
 
+    def reconcilable_executions(self):
+        with self.connect() as db:
+            return [r['id'] for r in db.execute("""
+                SELECT j.id FROM jobs AS j
+                WHERE j.kind='execute'
+                  AND j.state IN ('running','cancel_requested','outcome_unknown')
+                  AND EXISTS (
+                      SELECT 1 FROM execution_attempts AS a
+                      WHERE a.job=j.id AND a.remote_task_id IS NOT NULL
+                        AND a.attempt=(
+                            SELECT MAX(latest.attempt) FROM execution_attempts AS latest
+                            WHERE latest.job=j.id))
+                ORDER BY j.created
+            """)]
+
     def recover(self):
         # An interrupted provider turn may have been billed/committed. Never replay it silently.
         with self.connect() as db:
-            db.execute("UPDATE jobs SET state='interrupted',error='Service restarted during discussion; inspect recorded replies before continuing',updated=? WHERE state='running'", (time.time(),))
+            db.execute("""UPDATE jobs
+                SET state='interrupted',
+                    error='Service restarted during discussion; inspect recorded replies before continuing',
+                    updated=?
+                WHERE state='running' AND (
+                    kind!='execute' OR NOT EXISTS (
+                        SELECT 1 FROM execution_attempts AS a
+                        WHERE a.job=jobs.id AND a.remote_task_id IS NOT NULL
+                          AND a.attempt=(
+                              SELECT MAX(latest.attempt) FROM execution_attempts AS latest
+                              WHERE latest.job=jobs.id)))
+                """, (time.time(),))
             db.execute("UPDATE members SET state='interrupted' WHERE state='busy'")
             return [r['id'] for r in db.execute("SELECT id FROM jobs WHERE state='queued' ORDER BY created")]

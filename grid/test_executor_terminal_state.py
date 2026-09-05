@@ -17,6 +17,7 @@ What the old shared executor did wrong:
    task pinned in ``WORKING`` with no terminal state to fetch.
 """
 import asyncio
+import os
 import subprocess
 import sys
 import unittest
@@ -56,6 +57,7 @@ class _EchoShim(SubprocessAgentExecutor):
     TIMEOUT = 30
 
 
+@unittest.skipUnless(os.name == "nt", "Windows 专用 shim")
 class TestTimeoutIsATerminalFailure(unittest.TestCase):
     def test_timeout_raises_executor_timeout(self):
         with self.assertRaises(ExecutorTimeout) as caught:
@@ -89,6 +91,7 @@ class TestTimeoutIsATerminalFailure(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(os.name == "nt", "Windows 专用 shim")
 class TestHappyPathStillWorks(unittest.TestCase):
     def test_shell_child_output_is_returned(self):
         self.assertIn("hello-a2a", _EchoShim()._run("ignored"))

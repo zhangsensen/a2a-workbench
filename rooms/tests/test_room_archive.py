@@ -57,9 +57,9 @@ def test_submit_execute_also_auto_revives_archived_room(tmp_path, monkeypatch):
     monkeypatch.setattr(room_store, 'EXECUTORS', {'codex': 'http://127.0.0.1:10002'})
     monkeypatch.setattr(roundtable, 'EXECUTORS', {'codex': 'http://127.0.0.1:10002'})
 
-    async def fake_call(url, prompt, room):
+    async def fake_call(url, prompt, room, cwd, on_task_id):
         from a2a.types import TaskState
-        return TaskState.TASK_STATE_COMPLETED, 'done'
+        return TaskState.TASK_STATE_COMPLETED, 'done', .1
 
     monkeypatch.setattr(roundtable, 'call_executor', fake_call)
     app = create_app(tmp_path, FakeMember)

@@ -11,7 +11,13 @@
 
 tasks.json 形如：
     [{"agent": "codex", "name": "fix-x", "task": "……做什么……",
+      "mode": "modify",
       "verify": [{"type": "command", "argv": ["python", "-m", "unittest"]}]}]
+
+mode 可选，'modify'（默认）要求任务确实产生了 commit 或 diff，否则即使 verify
+全过也只标 no-change（不给 verified）——防止"要求实现功能、agent 啥都没
+做、verify 只是查到了本来就存在的文件"这种误判；'inspect' 用于本就不要求
+改动的检查类任务，不改动也可以 verified。
 
 约定（派活纪律，注入每个任务提示词）：
 - agent 必须在自己的 worktree 里 git commit（改动即提交，可追溯）；
@@ -75,6 +81,9 @@ def load_tasks(path: Path) -> list[dict]:
             raise SystemExit(f"任务 {name} 的 agent 未注册：{agent!r}（可选：{sorted(known)}）")
         if not text:
             raise SystemExit(f"任务 {name} 内容为空")
+        mode = task.get("mode", "modify")
+        if mode not in {"modify", "inspect"}:
+            raise SystemExit(f"任务 {name} 的 mode 不支持：{mode!r}（可选：modify, inspect）")
         if "verify" in task:
             checks = task["verify"]
             if not isinstance(checks, list):
@@ -150,28 +159,46 @@ async def run_dispatch(
             log.write_text(text + ("\n" if text and not text.endswith("\n") else ""), encoding="utf-8")
             row["log"] = str(log)
 
+        def collect_evidence(row: dict, tree: Path) -> None:
+            """收集 commit/diff/patch 证据，全部来自文件系统与 git，不信任
+            回复文本。无论任务终态如何都可调用——失败分支也不该丢掉 agent
+            已完成的部分工作（commit、未提交 diff、新文件）。先 git add -A
+            把未跟踪文件纳入 index：此时 agent 已结束、worktree 归收集方
+            所有，这一步是安全的；diff 改用 --cached 使新文件正文（而不只是
+            文件名）进入 patch。"""
+            _git(tree, "add", "-A")
+            row["commit"] = _git(tree, "log", "--oneline", f"{base_sha}..HEAD") or "(未提交)"
+            diff = _git(tree, "diff", "--cached", base_sha)
+            row["diffstat"] = _git(tree, "diff", "--cached", "--stat", base_sha) or "(无改动)"
+            patch = out / f"{stamp}-{name}.patch"
+            patch.write_text(
+                diff + ("\n" if diff and not diff.endswith("\n") else ""), encoding="utf-8",
+            )
+            row["patch"] = str(patch)
+
         try:
             reply = await caller(task["agent"], prompt, cwd=str(tree))
             row["reply_tail"] = reply[-800:]
         except AgentTaskFailed as failure:
             row.update(state="failed", detail=f"[{failure.state}] {failure.text[:500]}")
             write_failure_log(failure.text)
+            try:
+                collect_evidence(row, tree)
+            except Exception:  # noqa: BLE001 —— 收集失败不覆盖原失败状态，静默降级
+                pass
         except Exception as exc:  # noqa: BLE001
             error_text = f"{type(exc).__name__}: {exc}"
             row.update(state="error", detail=error_text[:500])
             write_failure_log(error_text)
+            try:
+                collect_evidence(row, tree)
+            except Exception:  # noqa: BLE001 —— 同上，静默降级
+                pass
         else:
             try:
-                # 证据收集全部来自文件系统与 git，不信任回复文本。
-                row["commit"] = _git(tree, "log", "--oneline", f"{base_sha}..HEAD") or "(未提交)"
-                diff = _git(tree, "diff", base_sha)
-                untracked = _git(tree, "status", "--short")
-                row["diffstat"] = _git(tree, "diff", "--stat", base_sha) or untracked or "(无改动)"
-                patch = out / f"{stamp}-{name}.patch"
-                patch.write_text(
-                    diff + ("\n" if diff and not diff.endswith("\n") else ""), encoding="utf-8",
-                )
-                row["patch"] = str(patch)
+                collect_evidence(row, tree)
+                mode = task.get("mode", "modify")
+                no_change = row["commit"] == "(未提交)" and row["diffstat"] == "(无改动)"
                 if "verify" in task:
                     evidence = run_checks(tree, task["verify"])
                     evidence_path = out / f"{stamp}-{name}-evidence.json"
@@ -182,9 +209,14 @@ async def run_dispatch(
                     if not all(item["passed"] for item in evidence):
                         row.update(state="refuted", detail="机器验收失败")
                         write_failure_log(row.get("reply_tail", ""))
+                    elif mode == "modify" and no_change:
+                        row.update(
+                            state="no-change",
+                            detail="modify 模式要求实质改动：verify 全过但无 commit 无 diff",
+                        )
                     else:
                         row["state"] = "verified"
-                elif not diff and not untracked:
+                elif no_change:
                     row.update(state="no-change", detail="任务完成但没有任何文件改动")
             except Exception as exc:  # noqa: BLE001
                 error_text = f"{type(exc).__name__}: {exc}"

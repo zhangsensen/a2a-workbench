@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import hashlib
+import inspect
 import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,10 +19,10 @@ import httpx
 import uvicorn
 from a2a.client import A2ACardResolver, ClientConfig, create_client
 from a2a.helpers import new_text_message
-from a2a.types import Role, SendMessageRequest, TaskState
+from a2a.types import CancelTaskRequest, GetTaskRequest, Role, SendMessageRequest, TaskState
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from room_agents import Member
 from settings import ROOT, DATA, PORT, BASE_URL, VERSION, EXECUTORS
@@ -44,7 +47,36 @@ def bounded_events_json(events, limit=EVENTS_JSON_BYTE_LIMIT):
         omitted += 1
 
 
-async def call_executor(url, prompt, room):
+def execution_context(room, cwd):
+    if not cwd:
+        return room
+    canonical_cwd = str(Path(cwd).resolve())
+    digest = hashlib.sha256(canonical_cwd.encode()).hexdigest()[:8]
+    return f'{room}-{digest}'
+
+
+def task_state_name(state):
+    try:
+        return TaskState.Name(state)
+    except (TypeError, ValueError):
+        return getattr(state, 'name', str(state))
+
+
+def task_text(task):
+    parts = []
+    for artifact in getattr(task, 'artifacts', []) or []:
+        for part in getattr(artifact, 'parts', []) or []:
+            if getattr(part, 'text', ''):
+                parts.append(part.text)
+    status_message = getattr(getattr(task, 'status', None), 'message', None)
+    for part in getattr(status_message, 'parts', []) or []:
+        if getattr(part, 'text', ''):
+            parts.append(part.text)
+    return '\n'.join(parts) if parts else '(no text returned by executor)'
+
+
+async def call_executor(url, prompt, room, cwd=None, on_task_id=None):
+    started = time.monotonic()
     http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     client = None
     try:
@@ -52,14 +84,25 @@ async def call_executor(url, prompt, room):
         client = await create_client(
             agent=card, client_config=ClientConfig(streaming=False, httpx_client=http)
         )
+        metadata = {'context': execution_context(room, cwd)}
+        if cwd:
+            metadata['cwd'] = cwd
         request = SendMessageRequest(
             message=new_text_message(prompt, role=Role.ROLE_USER),
-            metadata={'context': room},
+            metadata=metadata,
         )
         parts = []
         final_state = None
+        remote_task_id = None
         async for chunk in client.send_message(request):
             task = getattr(chunk, 'task', None)
+            task_id = getattr(task, 'id', None)
+            if task_id and remote_task_id is None:
+                remote_task_id = task_id
+                if on_task_id is not None:
+                    callback_result = on_task_id(task_id)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
             status = getattr(task, 'status', None)
             if status is not None:
                 final_state = status.state
@@ -67,11 +110,70 @@ async def call_executor(url, prompt, room):
                 for part in artifact.parts:
                     if getattr(part, 'text', ''):
                         parts.append(part.text)
-        return final_state, '\n'.join(parts) if parts else '(no text returned by executor)'
+        duration = time.monotonic() - started
+        return final_state, '\n'.join(parts) if parts else '(no text returned by executor)', duration
     finally:
         if client is not None:
             await client.close()
         await http.aclose()
+
+
+async def cancel_remote(url, task_id):
+    http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=10.0))
+    client = None
+    try:
+        async with asyncio.timeout(10):
+            card = await A2ACardResolver(httpx_client=http, base_url=url).get_agent_card()
+            client = await create_client(
+                agent=card, client_config=ClientConfig(streaming=False, httpx_client=http)
+            )
+            task = await client.cancel_task(CancelTaskRequest(id=task_id))
+            return task.status.state
+    finally:
+        if client is not None:
+            await client.close()
+        await http.aclose()
+
+
+async def get_remote(url, task_id):
+    http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=10.0))
+    client = None
+    try:
+        async with asyncio.timeout(10):
+            card = await A2ACardResolver(httpx_client=http, base_url=url).get_agent_card()
+            client = await create_client(
+                agent=card, client_config=ClientConfig(streaming=False, httpx_client=http)
+            )
+            return await client.get_task(GetTaskRequest(id=task_id))
+    finally:
+        if client is not None:
+            await client.close()
+        await http.aclose()
+
+
+def execution_metadata(job, attempt, duration):
+    metadata = {
+        'remote_task_id': attempt['remote_task_id'],
+        'cwd': job['cwd'],
+        'duration': duration,
+        'attempt': attempt['attempt'],
+    }
+    cwd = job['cwd']
+    if cwd and Path(cwd).is_dir():
+        commands = {
+            'git_log': ['git', '-C', cwd, 'log', '-1', '--oneline'],
+            'git_status': ['git', '-C', cwd, 'status', '--short'],
+        }
+        for field, command in commands.items():
+            try:
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=5, check=False
+                )
+                if result.returncode == 0:
+                    metadata[field] = result.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    return metadata
 
 
 class Discussion:
@@ -87,6 +189,7 @@ class Discussion:
         self.stopping = False
         self.execute_locks = {}
         self.execute_tasks = {}
+        self.reconcile_task = None
 
     def member(self, room, name):
         key = (room, name)
@@ -113,6 +216,7 @@ class Discussion:
                 self._schedule_execute(key)
             else:
                 await self.queue.put(key)
+        self.reconcile_task = asyncio.create_task(self._reconcile_executions())
         # Warm processes without spending tokens on fake conversation turns. Archived rooms stay cold.
         for room in self.store.rooms():
             if room['archived_at'] is None:
@@ -141,8 +245,8 @@ class Discussion:
         return job
 
     # 安全不变量：执行 job 只能从外部入口（HTTP/MCP）进来，代码中不存在从成员回复文本到 submit_execute 的任何通路；成员消息处理路径一行都不要碰。
-    def submit_execute(self, room, prompt, executor, key, speaker='master'):
-        job = self.store.submit_execute(room, prompt, executor, key, speaker)
+    def submit_execute(self, room, prompt, executor, key, speaker='master', cwd=None):
+        job = self.store.submit_execute(room, prompt, executor, key, speaker, cwd)
         if job['state'] == 'queued' and job['id'] not in self.execute_tasks:
             self._schedule_execute(job['id'])
         return job
@@ -159,26 +263,127 @@ class Discussion:
         async with lock:
             if not self.store.begin(key):
                 return
+            endpoint = EXECUTORS[job['executor']]
+            attempt_number = self.store.add_attempt(key, endpoint)
+            started = time.monotonic()
+
+            async def remember_remote_task(task_id):
+                self.store.set_attempt_remote(key, attempt_number, task_id)
+                if self.store.job(key)['state'] == 'cancel_requested':
+                    await self._cancel_known_attempt(key, self.store.latest_attempt(key))
+
             try:
-                final_state, text = await call_executor(
-                    EXECUTORS[job['executor']], job['prompt'], job['room']
+                final_state, text, duration = await call_executor(
+                    endpoint, job['prompt'], job['room'], job['cwd'], remember_remote_task
                 )
                 if final_state == TaskState.TASK_STATE_COMPLETED:
-                    self.store.finish_execute(key, 'completed', text)
+                    await self._finish_execute(key, attempt_number, 'completed', text, duration)
                 elif final_state == TaskState.TASK_STATE_FAILED:
-                    self.store.finish_execute(key, 'failed', text, text)
+                    await self._finish_execute(key, attempt_number, 'failed', text, duration, text)
+                elif final_state == TaskState.TASK_STATE_CANCELED:
+                    self.store.set_attempt_state(key, attempt_number, 'cancelled')
+                    self.store.finish_if(
+                        key, {'running', 'cancel_requested', 'outcome_unknown'}, 'cancelled'
+                    )
                 else:
-                    state = getattr(final_state, 'name', str(final_state))
+                    state = task_state_name(final_state)
                     error = f'Executor ended in unexpected state {state}: {text}'
-                    self.store.finish_execute(key, 'failed', error, error)
+                    await self._finish_execute(
+                        key, attempt_number, 'failed', error, duration, error
+                    )
             except asyncio.CancelledError:
                 if self.stopping and self.store.job(key)['state'] == 'running':
-                    self.store.finish(key, 'interrupted', 'Service stopped during execution')
+                    attempt = self.store.latest_attempt(key)
+                    if attempt and attempt['remote_task_id']:
+                        self.store.set_attempt_state(key, attempt_number, 'outcome_unknown')
+                        self.store.finish(
+                            key, 'outcome_unknown',
+                            'Service stopped after remote execution started; reconciliation required',
+                        )
+                    else:
+                        self.store.set_attempt_state(key, attempt_number, 'interrupted')
+                        self.store.finish(key, 'interrupted', 'Service stopped during execution')
                 raise
             except Exception as exc:
                 error = str(exc).strip() or f'{type(exc).__name__} during execution'
-                self.store.finish_execute(key, 'failed', error, error)
+                await self._finish_execute(
+                    key, attempt_number, 'failed', error, time.monotonic() - started, error
+                )
                 LOGGER.error('job=%s executor=%s failed (%s)', key, job['executor'], type(exc).__name__)
+
+    async def _finish_execute(self, key, attempt_number, state, text, duration, error=None):
+        job = self.store.job(key)
+        attempt = self.store.latest_attempt(key)
+        metadata = await asyncio.to_thread(execution_metadata, job, attempt, duration)
+        finished = self.store.finish_execute(key, state, text, error, metadata)
+        if finished:
+            self.store.set_attempt_state(key, attempt_number, state)
+        return finished
+
+    async def _cancel_known_attempt(self, key, attempt):
+        try:
+            remote_state = await cancel_remote(attempt['endpoint'], attempt['remote_task_id'])
+        except Exception as exc:
+            error = str(exc).strip() or type(exc).__name__
+            self.store.set_attempt_state(key, attempt['attempt'], 'outcome_unknown')
+            self.store.finish_if(
+                key, {'cancel_requested', 'outcome_unknown'}, 'outcome_unknown',
+                f'Remote cancellation outcome unknown: {error}',
+            )
+            return
+        if remote_state == TaskState.TASK_STATE_CANCELED:
+            self.store.set_attempt_state(key, attempt['attempt'], 'cancelled')
+            self.store.finish_if(
+                key, {'cancel_requested', 'outcome_unknown'}, 'cancelled'
+            )
+            return
+        state = task_state_name(remote_state)
+        self.store.set_attempt_state(key, attempt['attempt'], 'outcome_unknown')
+        self.store.finish_if(
+            key, {'cancel_requested', 'outcome_unknown'}, 'outcome_unknown',
+            f'Remote cancellation returned {state}; outcome unknown',
+        )
+
+    async def _reconcile_executions(self):
+        for key in self.store.reconcilable_executions():
+            job = self.store.job(key)
+            attempt = self.store.latest_attempt(key)
+            try:
+                remote_task = await get_remote(attempt['endpoint'], attempt['remote_task_id'])
+                remote_state = remote_task.status.state
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                error = str(exc).strip() or type(exc).__name__
+                self.store.set_attempt_state(key, attempt['attempt'], 'outcome_unknown')
+                self.store.finish_if(
+                    key, {'running', 'cancel_requested', 'outcome_unknown'}, 'outcome_unknown',
+                    f'Remote task reconciliation failed: {error}',
+                )
+                continue
+
+            duration = max(0.0, time.time() - attempt['created'])
+            if remote_state == TaskState.TASK_STATE_COMPLETED:
+                await self._finish_execute(
+                    key, attempt['attempt'], 'completed', task_text(remote_task), duration
+                )
+            elif remote_state == TaskState.TASK_STATE_FAILED:
+                text = task_text(remote_task)
+                await self._finish_execute(
+                    key, attempt['attempt'], 'failed', text, duration, text
+                )
+            elif remote_state == TaskState.TASK_STATE_CANCELED:
+                self.store.set_attempt_state(key, attempt['attempt'], 'cancelled')
+                self.store.finish_if(
+                    key, {'running', 'cancel_requested', 'outcome_unknown'}, 'cancelled'
+                )
+            else:
+                state = task_state_name(remote_state)
+                self.store.set_attempt_state(key, attempt['attempt'], 'outcome_unknown')
+                self.store.finish_if(
+                    key, {'running', 'cancel_requested', 'outcome_unknown'}, 'outcome_unknown',
+                    f'Remote task is {state}; outcome unknown',
+                )
 
     async def _work(self):
         while True:
@@ -235,18 +440,22 @@ class Discussion:
     async def wait(self, key):
         while True:
             job = self.store.job(key)
-            if job['state'] not in {'queued', 'running'}:
+            if job['state'] not in {'queued', 'running', 'cancel_requested'}:
                 return job
             await asyncio.sleep(.25)
 
     async def cancel(self, key, room):
         job = self.store.job(key, room)
+        if job['kind'] == 'execute':
+            if job['state'] not in {'queued', 'running', 'cancel_requested', 'outcome_unknown'}:
+                return job
+            self.store.request_cancel(key)
+            attempt = self.store.latest_attempt(key)
+            if attempt and attempt['remote_task_id']:
+                await self._cancel_known_attempt(key, attempt)
+            return self.store.job(key)
         if job['state'] not in {'queued', 'running'}:
             return job
-        if job['kind'] == 'execute':
-            # MVP 不回调 grid cancel；后续补远端取消。
-            self.store.finish(key, 'cancelled')
-            return self.store.job(key)
         if key == self.current_id and self.current:
             self.current.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -261,6 +470,10 @@ class Discussion:
 
     async def close(self):
         self.stopping = True
+        if self.reconcile_task:
+            self.reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.reconcile_task
         execute_tasks = list(self.execute_tasks.values())
         for task in execute_tasks:
             task.cancel()
@@ -295,6 +508,17 @@ class ExecuteInput(BaseModel):
     executor: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=50000)
     requestId: str = Field(min_length=1, max_length=100)
+    cwd: str | None = None
+
+    @field_validator('cwd')
+    @classmethod
+    def strip_nonempty_cwd(cls, value):
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError('cwd must be a nonempty string')
+        return value
 
 
 class CheckpointInput(BaseModel):
@@ -409,7 +633,9 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
     @app.post('/api/rooms/{room}/execute')
     async def execute(room: str, body: ExecuteInput):
         # This explicit external entry point is the only route from HTTP into execution.
-        return discussion.submit_execute(room, body.text, body.executor, body.requestId)
+        return discussion.submit_execute(
+            room, body.text, body.executor, body.requestId, cwd=body.cwd
+        )
 
     @app.get('/api/rooms/{room}/context')
     async def master_context(room: str, after: int | None = None, limit: int = 50):

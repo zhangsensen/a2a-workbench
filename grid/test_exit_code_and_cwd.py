@@ -7,6 +7,7 @@
    给了非法 cwd 必须响亮拒绝，不允许静默落回默认目录执行 ——
    "在错误的地方动手"比"拒绝执行"危险得多。
 """
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -40,6 +41,7 @@ class _PwdShim(SubprocessAgentExecutor):
     TIMEOUT = 30
 
 
+@unittest.skipUnless(os.name == "nt", "Windows 专用 shim")
 class TestNonZeroExitIsFailure(unittest.TestCase):
     def test_nonzero_exit_raises_with_both_streams(self):
         with self.assertRaises(ExecutorFailure) as caught:
@@ -54,6 +56,7 @@ class TestNonZeroExitIsFailure(unittest.TestCase):
         self.assertIn("fine", _OkShim()._run("ignored"))
 
 
+@unittest.skipUnless(os.name == "nt", "Windows 专用 shim")
 class TestCwdPinning(unittest.TestCase):
     def test_valid_cwd_changes_working_directory(self):
         target = str(Path(__file__).resolve().parent.parent)

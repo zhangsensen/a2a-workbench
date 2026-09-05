@@ -1,5 +1,6 @@
 """POSIX cancellation regression tests for SubprocessAgentExecutor."""
 import asyncio
+import os
 import subprocess
 import sys
 import unittest
@@ -51,6 +52,7 @@ def _cancel_context(task_id: str):
     return SimpleNamespace(task_id=task_id, context_id="context-1")
 
 
+@unittest.skipIf(os.name == "nt", "POSIX 专用 shim")
 class TestCancel(unittest.TestCase):
     def setUp(self) -> None:
         with SubprocessAgentExecutor._running_processes_lock:

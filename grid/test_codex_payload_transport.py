@@ -58,7 +58,12 @@ class CodexPayloadTransportTests(unittest.TestCase):
             self.assertEqual(executor._run(payload), "ok")
         command = popen.call_args.args[0]
         self.assertIn("exec", command)
-        self.assertTrue(command.rstrip().endswith(" -"), command)
+        if isinstance(command, str):
+            # Windows .cmd shim：list2cmdline 拼成字符串，query 只在 stdin。
+            self.assertTrue(command.rstrip().endswith(" -"), command)
+        else:
+            # POSIX：argv 列表直接 exec，同一契约的列表形态。
+            self.assertEqual(command[-1], "-", command)
         self.assertNotIn(payload, command)
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
         self.assertEqual(fake.sent, payload.encode("utf-8"))

@@ -1,5 +1,6 @@
 """POSIX regression tests for native CLI session continuity."""
 import asyncio
+import os
 import re
 import sqlite3
 import sys
@@ -43,6 +44,7 @@ def _context(task_id: str, query: str, metadata: dict[str, str]):
     )
 
 
+@unittest.skipIf(os.name == "nt", "POSIX 专用 shim")
 class TestSessionContinuity(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
