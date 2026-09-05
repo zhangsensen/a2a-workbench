@@ -30,6 +30,7 @@ The `lobby` room is precreated, but requests and new browser tabs do not implici
 - Every HTTP message/history route names the room in its path.
 - HTTP job lookup and cancellation require `?room=...`, and reject another room's job ID.
 - MCP `post`, `history`, `job`, and `cancel` require `room`.
+- Master `consult`, `context`, and `checkpoint` also require `room`. Context cursors must belong to that room; checkpoints require the revision read by the master.
 - A2A SendMessage requires an existing `message.contextId`; missing or unknown contexts fail before model calls. GetTask/CancelTask/SubscribeToTask require `X-A2A-Room`. ListTasks requires `contextId`.
 - A2A task IDs and referenced task IDs must belong to the selected room. Raw A2A v1.0 requests need `A2A-Version: 1.0`.
 - The database requires unique native session IDs. The host validates room and participant ownership before provider input and before recording replies.
@@ -47,6 +48,9 @@ The application allows up to eight warm rooms and serializes discussion jobs. Th
 | `/api/rooms/{room}` | Room member status |
 | `/api/rooms/{room}/messages` | Read/post room events |
 | `/api/rooms/{room}/jobs` | Recent job metadata for that room |
+| `/api/rooms/{room}/consult` | POST: one peer consultation from the master; explicit requestId required |
+| `/api/rooms/{room}/context` | GET: master checkpoint plus subsequent events (`after`, `limit` for paging) |
+| `/api/rooms/{room}/checkpoint` | POST: save master progress with expectedRevision and throughSeq |
 | `/api/jobs/{id}?room={room}` | Read the scoped job and recorded replies |
 | `/api/jobs/{id}/cancel?room={room}` | Cancel a scoped job |
 | `/api/rooms/{room}/warm` | Explicitly try restoring the room's participants |
@@ -54,6 +58,8 @@ The application allows up to eight warm rooms and serializes discussion jobs. Th
 | `/a2a/jsonrpc`, `/a2a/rest` | A2A v1.0 transports |
 
 ## Troubleshooting
+
+For adaptive model-led discussion, follow [MASTER.md](MASTER.md). Job reads accept `waitSeconds=0..25`; a wait timeout returns the current receipt rather than cancelling, retrying, or declaring the model failed. Master checkpoints are stored in the room database, separately from native peer sessions. After updating the server and MCP script, reconnect the MCP client to load the new tools and initialization instructions.
 
 - **Port occupied:** do not kill an unrelated process. Stop your other copy or set `A2A_PORT` consistently.
 - **Participant unavailable:** confirm the official client is installed and signed in. Check executable overrides and configured models. Retry the room's warm endpoint after fixing the client. A live subprocess alone is not proof of a successful model turn.

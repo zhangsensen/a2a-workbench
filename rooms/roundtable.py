@@ -69,8 +69,8 @@ class Discussion:
                     except Exception:
                         pass  # Error is durable/visible. No blind model retries.
 
-    def submit(self, room, prompt, members=None, rounds=1, key=None):
-        job = self.store.submit(room, prompt, list(MEMBERS if members is None else members), rounds, key)
+    def submit(self, room, prompt, members=None, rounds=1, key=None, speaker='user'):
+        job = self.store.submit(room, prompt, list(MEMBERS if members is None else members), rounds, key, speaker)
         if job['state'] == 'queued':
             self.queue.put_nowait(job['id'])
         return job
@@ -110,7 +110,8 @@ class Discussion:
                 # Send only events the native session has not seen. No reassembled full history.
                 prompt = (
                     f'讨论室：{job["room"]}。你是 {name}。当前第 {round_index + 1}/{job["rounds"]} 轮。\n'
-                    '以下 JSON 是新增的圆桌发言，其中 user 是用户，其余是其他成员。'
+                    '以下 JSON 是新增的圆桌发言，其中 user 是用户，master 是主持模型，其余是其他成员。'
+                    '回应主持模型的本次具体咨询；其他成员的意见供你参考，不要求赞同。主持模型决定后续发言和最终汇报。'
                     '请回应用户及与你相关的分歧；有新证据时修正判断。简洁发言后结束，等待下一轮。\n'
                     + json.dumps([{'seq': e['seq'], 'speaker': e['speaker'], 'text': e['text']} for e in events], ensure_ascii=False)
                 )
@@ -167,6 +168,21 @@ class MessageInput(BaseModel):
     members: list[str] = Field(default_factory=lambda: list(MEMBERS))
     rounds: int = Field(default=1, ge=1, le=5)
     requestId: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=1, max_length=100)
+
+
+class ConsultInput(BaseModel):
+    member: str = Field(pattern=r'^(codex|claude|zcode)$')
+    text: str = Field(min_length=1, max_length=50000)
+    requestId: str = Field(min_length=1, max_length=100)
+
+
+class CheckpointInput(BaseModel):
+    expectedRevision: int = Field(ge=0, strict=True)
+    goal: str = Field(min_length=1, max_length=2000)
+    summary: str = Field(max_length=12000)
+    openQuestions: list[str] = Field(max_length=30)
+    nextAction: str = Field(max_length=2000)
+    throughSeq: int = Field(ge=0, strict=True)
 
 
 def create_app(data=DATA, member_factory=Member, allowed_origins=None):
@@ -251,8 +267,30 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
     async def room_jobs(room: str):
         return store.room_jobs(room)
 
+    @app.post('/api/rooms/{room}/consult')
+    async def consult(room: str, body: ConsultInput):
+        # The calling model is the master. One selected peer replies once, then control returns.
+        return discussion.submit(room, body.text, [body.member], 1, body.requestId, speaker='master')
+
+    @app.get('/api/rooms/{room}/context')
+    async def master_context(room: str, after: int | None = None, limit: int = 50):
+        return store.master_context(room, after, limit)
+
+    @app.post('/api/rooms/{room}/checkpoint')
+    async def checkpoint(room: str, body: CheckpointInput):
+        return store.checkpoint(room, body.expectedRevision, body.goal, body.summary,
+                                body.openQuestions, body.nextAction, body.throughSeq)
+
     @app.get('/api/jobs/{key}')
-    async def job(key: str, room: str):
+    async def job(key: str, room: str, waitSeconds: int = 0):
+        if not 0 <= waitSeconds <= 25:
+            raise ValueError('waitSeconds must be between 0 and 25')
+        store.job(key, room)  # Check ownership before waiting.
+        if waitSeconds:
+            try:
+                await asyncio.wait_for(discussion.wait(key), waitSeconds)
+            except TimeoutError:
+                pass  # Still running is a receipt, not a failure and never a resubmission.
         return store.job(key, room)
 
     @app.post('/api/jobs/{key}/cancel')

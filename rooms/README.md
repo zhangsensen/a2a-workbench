@@ -1,13 +1,17 @@
 # A2A Roundtable
 
-**Persistent conversations. Separate rooms. Codex, Claude Code, and ZCode at one table.**
+**One master leads. Persistent peers discuss. Each topic keeps its own context.**
 
-[中文说明](README.zh-CN.md) · [Operations](OPERATIONS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+[中文说明](README.zh-CN.md) · [Master workflow](MASTER.md) · [Operations](OPERATIONS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-A local Agent2Agent service for discussions that continue over time. Each room gives each participant its own native conversation. Post a follow-up and the participants continue that discussion instead of starting from an empty session.
+A local Agent2Agent service for a coordinating model to consult Codex, Claude Code, and ZCode over time. You talk to your master model; it selects peers, asks follow-ups, evaluates disagreements, and reports back. Each topic has its own room and each peer keeps a native conversation. You do not need to operate a browser or manage the discussion manually.
+
+The master is the model in your calling MCP client. The service does not start an additional autonomous master model. It supplies persistent peers and room-scoped recovery notes so that the calling model can lead the conversation.
 
 - **Warm sessions:** provider processes stay alive between turns. After a service restart, the host resumes the saved native session IDs.
 - **Room isolation:** messages, jobs, unread cursors, drafts, and native sessions belong to an explicit room. There is no implicit target room for requests.
+- **Master-led consultations:** select one peer per question, read its actual answer, then decide the next step. The master controls when to stop and how to synthesize the result.
+- **Master recovery:** save a room's goal, summary, open questions, and next action. Recover that checkpoint plus subsequent events without replaying the entire transcript into the master.
 - **Finite roundtables:** choose participants and 1–5 rounds. Participants speak in order and see earlier contributions. They stop when the requested rounds finish.
 - **Several entry points:** browser UI, HTTP, A2A v1.0 JSON-RPC/HTTP+JSON, and a small stdio MCP client.
 - **Local persistence:** SQLite stores room events and job state. Only unseen room events are appended to a participant's existing native conversation.
@@ -16,7 +20,8 @@ A local Agent2Agent service for discussions that continue over time. Each room g
 
 ```mermaid
 flowchart LR
-    UI[Browser / MCP / A2A client] --> H[Local roundtable host]
+    U[User] --> M[Master model in an MCP client]
+    M --> H[Local roundtable host]
     H --> Q[Serial discussion queue]
     H --> DB[(Room / job / cursor database)]
     Q --> A[Room A: dedicated Codex, Claude, ZCode sessions]
@@ -48,7 +53,7 @@ uv sync --locked --group dev
 uv run python roundtable.py
 ```
 
-Open **http://127.0.0.1:41241/**. Select the precreated `lobby` room or create another room, choose participants, and send a message. The UI starts with no selected room.
+In a second terminal, run `uv run python service.py mcp-config` and add the printed entry to your master's MCP client using its supported setup flow. Reconnect MCP, then ask your master to consult the relevant peers. See the [master workflow](MASTER.md). The browser at **http://127.0.0.1:41241/** is optional.
 
 For a persistent macOS service, first stop the foreground process with Ctrl-C, then run:
 
@@ -114,9 +119,13 @@ command = "/absolute/path/to/a2a-roundtable/.venv/bin/python"
 args = ["/absolute/path/to/a2a-roundtable/roundtable_mcp.py"]
 ```
 
-Tools: `roundtable_rooms`, `roundtable_create_room`, `roundtable_status`, `roundtable_post`, `roundtable_history`, `roundtable_job`, and `roundtable_cancel`.
+Master workflow: `roundtable_rooms` / `roundtable_create_room` → `roundtable_context` → `roundtable_consult` → `roundtable_job` → follow-up consultations as needed → `roundtable_checkpoint` → report to the user.
 
-`post`, `history`, `job`, and `cancel` require an explicit `room`. The MCP process is just a client; reconnecting it does not restart model conversations.
+`roundtable_consult` asks exactly one peer once. Supply a stable `requestId` and use `roundtable_job` with optional `waitSeconds` (0–25) to read its result. Waiting does not invoke models or resubmit a request. `roundtable_context` returns a checkpoint and subsequent events with explicit pagination. Checkpoint revisions reject stale overwrites; exact retries are idempotent.
+
+The existing `roundtable_status`, `roundtable_post`, `roundtable_history`, and `roundtable_cancel` tools remain available. `roundtable_post` is the optional fixed-round mode; adaptive master-led discussion uses `roundtable_consult`.
+
+All consultation, context, checkpoint, post, history, job, and cancel operations require an explicit `room`. The MCP process is just a client; reconnecting it does not restart model conversations.
 
 ## Configuration
 
