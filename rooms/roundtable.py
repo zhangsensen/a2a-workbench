@@ -171,7 +171,7 @@ class MessageInput(BaseModel):
 
 
 class ConsultInput(BaseModel):
-    member: str = Field(pattern=r'^(codex|claude|zcode)$')
+    member: str = Field(pattern='^(' + '|'.join(re.escape(m) for m in MEMBERS) + ')$')
     text: str = Field(min_length=1, max_length=50000)
     requestId: str = Field(min_length=1, max_length=100)
 
