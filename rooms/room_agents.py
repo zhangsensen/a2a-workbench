@@ -115,7 +115,8 @@ class Member:
         if self.name == 'claude':
             self.model = os.environ.get('A2A_CLAUDE_MODEL', 'sonnet')
             self.native_id = self.native_id or str(uuid.uuid4())
-            args = [executable('claude'), '-p', '--safe-mode',
+            # --safe-mode 在 claude 2.1.x 已移除；无工具+plan 模式已覆盖其意图。
+            args = [executable('claude'), '-p',
                     '--permission-mode', 'plan', '--tools', '', '--model', self.model,
                     '--effort', 'high', '--input-format', 'stream-json',
                     '--output-format', 'stream-json', '--verbose',

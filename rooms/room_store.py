@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -8,7 +9,13 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-MEMBERS = ("codex", "claude", "zcode")
+# 席位可配置：A2A_MEMBERS="codex,claude"。默认保持上游三席。
+_KNOWN_MEMBERS = ("codex", "claude", "zcode")
+MEMBERS = tuple(dict.fromkeys(
+    name.strip() for name in os.environ.get("A2A_MEMBERS", ",".join(_KNOWN_MEMBERS)).split(",") if name.strip()
+))
+if not MEMBERS or not set(MEMBERS) <= set(_KNOWN_MEMBERS):
+    raise ValueError(f"A2A_MEMBERS must be a comma list within {_KNOWN_MEMBERS}")
 
 
 class RoomStore:

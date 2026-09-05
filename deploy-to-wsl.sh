@@ -85,6 +85,39 @@ pkill -f 'a2a-agents/venv/bin/python' 2>/dev/null || true
 sleep 1
 systemctl start a2a-pi a2a-claude a2a-codex a2a-dsh
 
+echo "== rooms: rsync $REPO/rooms -> /root/a2a-rooms =="
+rsync -a --delete \
+  --exclude .git --exclude data --exclude __pycache__ --exclude '*.pyc' \
+  --exclude logs --exclude '*.db' --exclude '*.log' --exclude .pytest_cache \
+  "$REPO/rooms/" /root/a2a-rooms/
+
+cat > /etc/systemd/system/a2a-rooms.service <<UNIT
+[Unit]
+Description=A2A rooms (persistent roundtable, port 41241)
+After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=$DST/venv/bin/python /root/a2a-rooms/roundtable.py
+WorkingDirectory=/root/a2a-rooms
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=A2A_MEMBERS=codex,claude
+Environment=A2A_ROOM_DATA=/root/a2a-rooms-data
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/a2a-rooms.log
+StandardError=append:/var/log/a2a-rooms.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable a2a-rooms >/dev/null 2>&1 || true
+systemctl restart a2a-rooms
+
 echo "== 验收：四张 Agent Card 版本戳必须等于 $STAMP =="
 sleep 3
 ok=1
@@ -99,6 +132,13 @@ for port in 10000 10001 10002 10003; do
     ok=0
   fi
 done
+rooms_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:41241/healthz" || true)
+if [ "$rooms_code" = 200 ]; then
+  echo "  rooms 41241 OK"
+else
+  echo "  rooms 41241 FAIL http=$rooms_code（查 /var/log/a2a-rooms.log）"
+  ok=0
+fi
 if [ "$ok" = 1 ]; then
   echo "DEPLOY OK $STAMP"
 else
