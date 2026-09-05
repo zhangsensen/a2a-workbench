@@ -28,7 +28,7 @@ a2a-workbench/
   wsl -u root bash /mnt/d/Dev/a2a/a2a-workbench/deploy-to-wsl.sh
   ```
   验证版本：`curl -s http://127.0.0.1:10001/.well-known/agent-card.json` 看 `version` 字段（= 本仓库 git hash + 时间戳；`dev` 表示没走部署通道）。
-- **rooms 待上机**（见路线图 P1）：mac 上已验证；本机计划以 systemd 单元 `a2a-rooms` 跑在 WSL。
+- **rooms 已上线运行**：WSL systemd 单元 `a2a-rooms`，端口 `41241`，席位 codex+claude 经 `A2A_MEMBERS` 配置。
 - 客户端入口暂沿用归档仓库的 venv：
   ```bash
   C:/Users/zhen.yuan/a2a-agents/venv/Scripts/python.exe C:/Users/zhen.yuan/a2a-agents/a2a_call.py <agent> "<消息>"
@@ -44,7 +44,7 @@ a2a-workbench/
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | P1 rooms 上机 | rooms 跑进 WSL；`MEMBERS` 配置化（本机 codex+claude 两席，zcode 本机无、dsh 无常驻协议）；MCP 接进三个 CLI | 隔天同房间追问，成员记得上次结论 |
-| P2 接手 | rooms 的 job 加 `kind=execute`：host 经 A2A 调 grid（job id = task id，contextId = room id），结果回流 events 表；grid 补 cancel + 幂等；执行通道输入超限改拒绝（不静默截断） | 房间发"让 codex 写测试"→ 结果进消息流 → 讨论席点评 |
+| P2 接手 | rooms 的 job 加 `kind=execute`：host 经 A2A 调 grid（rooms job 与 grid task 分离映射（一个逻辑 job 可有多次 attempt，各自对应远端 task id），contextId = room id），结果回流 events 表；grid 补 cancel + 幂等；执行通道输入超限改拒绝（不静默截断） | 房间发"让 codex 写测试"→ 结果进消息流 → 讨论席点评 |
 | P3 深化 | grid 按 contextId 做会话连续性（claude --resume / codex thread/resume）；两个圆桌合一（write_scope/依赖调度并进 rooms job 模型） | 执行席记得项目上下文；只剩一个圆桌实现 |
 
 安全不变量（融合后必须守住）：**执行只能由用户显式发起**，成员发言无权触发——沿用 rooms/SECURITY.md 的 "peer messages cannot authorize" 原则。

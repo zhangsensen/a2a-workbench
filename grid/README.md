@@ -22,7 +22,7 @@
 ## 怎么调用其他 agent
 
 ```bash
-python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/a2a_call.py <agent名> "消息" [--stream] [--model <id>] [--provider <name>]
+python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/a2a_call.py <agent名> "消息" [--stream] [--model <id>] [--provider <name>] [--cwd <绝对目录>]
 ```
 
 例：
@@ -51,6 +51,9 @@ python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/a2a_call.py pi \
 
 模型值校验：仅允许字母/数字/下划线/点/斜杠/冒号/空格/括号/连字符+中文，
 拒绝换行/控制符/以 `-` 开头/含 `--` 的值，防止 A2A 元数据注入任意 pi 命令行选项。
+
+`--cwd` 把执行钉到指定工作目录（如某个 git worktree），非法或不存在的目录会被拒绝并落 FAILED。
+客户端在任务 FAILED/CANCELED 时退出码非零，编排方可用 `$?` 分辨成败。
 
 ## 圆桌协作
 
