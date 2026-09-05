@@ -55,6 +55,11 @@ python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/a2a_call.py pi \
 `--cwd` 把执行钉到指定工作目录（如某个 git worktree），非法或不存在的目录会被拒绝并落 FAILED。
 客户端在任务 FAILED/CANCELED 时退出码非零，编排方可用 `$?` 分辨成败。
 
+`--context <id>` 启用会话连续性（目前仅 claude）：同 context 的调用延续同一原生会话，
+执行手记得此前的工作；同 context 并发到达会被串行。`--fresh-context` 换一个全新原生会话。
+注意：新会话只保证原生对话历史归零，CLI 自身的跨会话记忆（如 Claude Code auto-memory）
+不受影响——context 是会话路由键，不是隔离边界。
+
 ## 圆桌协作
 
 ```bash
