@@ -5,8 +5,8 @@
 ## 运行形态与部署（2026-09-05 收敛，必读）
 
 - **运行环境是 WSL**：四个 server 由 systemd 单元 `a2a-{pi,claude,codex,dsh}` 在 WSL Ubuntu 里以 root 运行（`Restart=always` 崩溃自愈、开机自启），监听 127.0.0.1:10000-10003，Windows 经 mirrored 网络直接访问。**Windows 侧 netstat 看不到这些监听是正常形态，不是故障。**
-- **源码真源是 a2a-workbench 仓库的 `grid/` 目录**（`C:\Users\zhen.yuan\a2a-workbench\grid`，2026-09-05 起；此前的 `C:\Users\zhen.yuan\a2a-agents` 已归档）；WSL 的 `/root/a2a-agents` 是部署产物，**不要直接改**。
-- **唯一部署通道**：改代码 → `git commit` → `wsl -u root bash /mnt/c/Users/zhen.yuan/a2a-workbench/deploy-to-wsl.sh`。脚本会 rsync 代码、写 VERSION 版本戳、重启 systemd 单元，并验收四张 Agent Card 的 `version` 字段等于本次戳。
+- **源码真源是 a2a-workbench 仓库的 `grid/` 目录**（`D:\Dev\a2a\a2a-workbench\grid`，2026-09-05 起；此前的 `C:\Users\zhen.yuan\a2a-agents` 已归档）；WSL 的 `/root/a2a-agents` 是部署产物，**不要直接改**。
+- **唯一部署通道**：改代码 → `git commit` → `wsl -u root bash /mnt/d/Dev/a2a/a2a-workbench/deploy-to-wsl.sh`。脚本会 rsync 代码、写 VERSION 版本戳、重启 systemd 单元，并验收四张 Agent Card 的 `version` 字段等于本次戳。
 - **验证在跑哪个版本**：`curl -s http://127.0.0.1:10001/.well-known/agent-card.json | python -c "import json,sys;print(json.load(sys.stdin)['version'])"`——输出形如 `abc1234-20260905-183000`；`dev` 表示没走部署通道。
 - 历史教训：2026-08 迁 WSL 后靠手工拷贝，两周内所有修复只落在 Windows 份、活环境静默停在旧版且健康检查全绿。Windows watchdog（watchdog.ps1/agent_loop.ps1/A2AAgents.vbs）已于 2026-09-05 退役，避免双 owner 竞态。
 

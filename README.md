@@ -25,7 +25,7 @@ a2a-workbench/
 
 - **grid 在役**：WSL systemd 单元 `a2a-{pi,claude,codex,dsh}`。部署：
   ```bash
-  wsl -u root bash /mnt/c/Users/zhen.yuan/a2a-workbench/deploy-to-wsl.sh
+  wsl -u root bash /mnt/d/Dev/a2a/a2a-workbench/deploy-to-wsl.sh
   ```
   验证版本：`curl -s http://127.0.0.1:10001/.well-known/agent-card.json` 看 `version` 字段（= 本仓库 git hash + 时间戳；`dev` 表示没走部署通道）。
 - **rooms 待上机**（见路线图 P1）：mac 上已验证；本机计划以 systemd 单元 `a2a-rooms` 跑在 WSL。
