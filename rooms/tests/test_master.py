@@ -116,9 +116,12 @@ def test_new_mcp_tools_require_room_and_fields_before_network(monkeypatch):
     for name in ('roundtable_context','roundtable_consult','roundtable_checkpoint'):
         for room in (None, '', ' '):
             with pytest.raises(ValueError): roundtable_mcp.call(name, {'room':room})
-    with pytest.raises(ValueError): roundtable_mcp.call('roundtable_consult', {'room':'a','member':'claude','text':'Question'})
+    with pytest.raises(ValueError): roundtable_mcp.call('roundtable_consult', {'room':'a','member':'claude'})
     with pytest.raises(ValueError): roundtable_mcp.call('roundtable_job', {'room':'a','id':'job','waitSeconds':26})
     assert not calls
+    # 新契约：requestId 缺省时客户端自动生成，字段齐备后才发起首次网络调用。
+    roundtable_mcp.call('roundtable_consult', {'room':'a','member':'claude','text':'Question'})
+    assert len(calls) == 1 and calls[0][0] == '/api/rooms/a/consult' and calls[0][1]['requestId']
 
 
 def test_wait_timeout_is_a_receipt_and_cancel_keeps_master_event(tmp_path):

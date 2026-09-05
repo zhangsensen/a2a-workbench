@@ -49,6 +49,8 @@ class RoomStore:
             """)
             if 'attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(members)')}:
                 db.execute('ALTER TABLE members ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
+            if 'archived_at' not in {r['name'] for r in db.execute('PRAGMA table_info(rooms)')}:
+                db.execute('ALTER TABLE rooms ADD COLUMN archived_at REAL')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS unique_native_session ON members(native_id) WHERE native_id IS NOT NULL')
             if 'speaker' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute("ALTER TABLE jobs ADD COLUMN speaker TEXT NOT NULL DEFAULT 'user'")
@@ -78,7 +80,10 @@ class RoomStore:
             old = db.execute('SELECT title FROM rooms WHERE id=?', (room,)).fetchone()
             if old and old['title'] != title:
                 raise ValueError('Room ID already belongs to a different title; choose a new ID')
-            db.execute("INSERT OR IGNORE INTO rooms VALUES (?,?,?)", (room, title, time.time()))
+            db.execute("INSERT OR IGNORE INTO rooms(id,title,created) VALUES (?,?,?)", (room, title, time.time()))
+            if old:
+                # Recreating an existing (possibly archived) room by its own id+title revives it.
+                db.execute('UPDATE rooms SET archived_at=NULL WHERE id=?', (room,))
             for name in MEMBERS:
                 db.execute("INSERT OR IGNORE INTO members(room,name) VALUES (?,?)", (room, name))
         return self.room(room)
@@ -95,6 +100,20 @@ class RoomStore:
     def rooms(self):
         with self.connect() as db:
             return [dict(r) for r in db.execute("SELECT * FROM rooms ORDER BY created")]
+
+    def archive_room(self, room):
+        with self.connect() as db:
+            result = db.execute('UPDATE rooms SET archived_at=? WHERE id=?', (time.time(), room))
+            if not result.rowcount:
+                raise KeyError(room)
+        return self.room(room)
+
+    def unarchive_room(self, room):
+        with self.connect() as db:
+            result = db.execute('UPDATE rooms SET archived_at=NULL WHERE id=?', (room,))
+            if not result.rowcount:
+                raise KeyError(room)
+        return self.room(room)
 
     def member(self, room, name):
         with self.connect() as db:
@@ -120,7 +139,9 @@ class RoomStore:
             return [dict(r) for r in db.execute("SELECT * FROM events WHERE room=? AND seq>? ORDER BY seq", (room, after))]
 
     def submit(self, room, prompt, members, rounds, key=None, speaker='user'):
-        self.room(room)
+        current = self.room(room)
+        if current['archived_at'] is not None:
+            self.unarchive_room(room)  # New activity automatically revives an archived room.
         if not prompt.strip() or not members or len(set(members)) != len(members) or not set(members) <= set(MEMBERS):
             raise ValueError('Supply a message and unique valid participants')
         if not 1 <= rounds <= 5:
@@ -139,7 +160,9 @@ class RoomStore:
         return self.job(key)
 
     def submit_execute(self, room, prompt, executor, key, speaker='master'):
-        self.room(room)
+        current = self.room(room)
+        if current['archived_at'] is not None:
+            self.unarchive_room(room)  # New activity automatically revives an archived room.
         if executor not in EXECUTORS:
             raise ValueError('Executor is not configured')
         if not isinstance(prompt, str) or not prompt.strip():

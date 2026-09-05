@@ -26,6 +26,22 @@ from settings import ROOT, DATA, PORT, BASE_URL, VERSION, EXECUTORS
 from room_store import MEMBERS, RoomStore
 
 LOGGER = logging.getLogger('a2a-roundtable')
+EVENTS_JSON_BYTE_LIMIT = 60000
+
+
+def bounded_events_json(events, limit=EVENTS_JSON_BYTE_LIMIT):
+    """Serialize room events as JSON, dropping the oldest entries to stay within a UTF-8 byte budget.
+
+    Returns (payload, omitted) where omitted is how many of the oldest events were dropped.
+    """
+    remaining = list(events)
+    omitted = 0
+    while True:
+        payload = json.dumps([{'seq': e['seq'], 'speaker': e['speaker'], 'text': e['text']} for e in remaining], ensure_ascii=False)
+        if len(payload.encode('utf-8')) <= limit or not remaining:
+            return payload, omitted
+        remaining = remaining[1:]
+        omitted += 1
 
 
 async def call_executor(url, prompt, room):
@@ -84,6 +100,12 @@ class Discussion:
             if isinstance(result, Exception):
                 LOGGER.warning('room=%s member=%s warm failed (%s)', room, name, type(result).__name__)
 
+    async def close_room(self, room):
+        # Archiving releases the warmed native processes for this room; new activity re-warms lazily.
+        keys = [key for key in self.members if key[0] == room]
+        closing = [self.members.pop(key).close() for key in keys]
+        await asyncio.gather(*closing, return_exceptions=True)
+
     async def start(self):
         self.store.create_room('lobby', 'Lobby / 公共圆桌')
         for key in self.store.recover():
@@ -91,16 +113,20 @@ class Discussion:
                 self._schedule_execute(key)
             else:
                 await self.queue.put(key)
-        # Warm processes without spending tokens on fake conversation turns.
+        # Warm processes without spending tokens on fake conversation turns. Archived rooms stay cold.
         for room in self.store.rooms():
-            await self.warm_room(room['id'])
+            if room['archived_at'] is None:
+                await self.warm_room(room['id'])
         self.worker = asyncio.create_task(self._work())
         self.keeper = asyncio.create_task(self._keep_warm())
 
     async def _keep_warm(self):
         while True:
             await asyncio.sleep(30)
+            active = {r['id'] for r in self.store.rooms() if r['archived_at'] is None}
             for member in list(self.members.values()):
+                if member.room not in active:
+                    continue
                 status = member.status()
                 if not status['processAlive'] and status['state'] == 'ready':
                     try:
@@ -187,12 +213,14 @@ class Discussion:
                 row = self.store.member(job['room'], name)
                 events = self.store.events(job['room'], row['cursor'])
                 # Send only events the native session has not seen. No reassembled full history.
+                payload, omitted = bounded_events_json(events)
+                omitted_note = f'（已省略 {omitted} 条更早消息以控制体积。）\n' if omitted else ''
                 prompt = (
                     f'讨论室：{job["room"]}。你是 {name}。当前第 {round_index + 1}/{job["rounds"]} 轮。\n'
                     '以下 JSON 是新增的圆桌发言，其中 user 是用户，master 是主持模型，其余是其他成员。'
                     '回应主持模型的本次具体咨询；其他成员的意见供你参考，不要求赞同。主持模型决定后续发言和最终汇报。'
                     '请回应用户及与你相关的分歧；有新证据时修正判断。简洁发言后结束，等待下一轮。\n'
-                    + json.dumps([{'seq': e['seq'], 'speaker': e['speaker'], 'text': e['text']} for e in events], ensure_ascii=False)
+                    + omitted_note + payload
                 )
                 try:
                     await self.member(job['room'], name).ask(prompt, key)
@@ -337,11 +365,24 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
 
     @app.post('/api/rooms')
     async def create_room(body: RoomInput):
-        if len(store.rooms()) >= 8 and body.id not in {r['id'] for r in store.rooms()}:
+        active_ids = {r['id'] for r in store.rooms() if r['archived_at'] is None}
+        if len(active_ids) >= 8 and body.id not in active_ids:
             raise HTTPException(409, 'At most eight warm rooms are supported')
         result = store.create_room(body.id, body.title)
         await discussion.warm_room(body.id)
         return discussion.status(body.id)
+
+    @app.post('/api/rooms/{room}/archive')
+    async def archive_room(room: str):
+        result = store.archive_room(room)
+        await discussion.close_room(room)
+        return result
+
+    @app.delete('/api/rooms/{room}/archive')
+    async def unarchive_room(room: str):
+        result = store.unarchive_room(room)
+        await discussion.warm_room(room)
+        return result
 
     @app.get('/api/rooms/{room}')
     async def status(room: str):
