@@ -31,6 +31,7 @@ TOOLS = [
     {'name': 'roundtable_create_room', 'description': 'Create a separate persistent topic. Reuse an existing room for continuing discussion.', 'inputSchema': {'type': 'object', 'properties': {'id': {'type':'string'}, 'title':{'type':'string'}}, 'required':['id','title']}},
     {'name':'roundtable_context','description':'Master: recover one room goal, summary, open questions, next action, job states, and events since its checkpoint. Read nextAfter pages while hasMore; after=0 explicitly rereads history.', 'inputSchema':{'type':'object','properties':{'room':{'type':'string'},'after':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':200,'default':50}},'required':['room']}},
     {'name':'roundtable_consult','description':'Master: ask one selected persistent peer a focused question. Only that peer replies once; then you decide the next consultation or final synthesis. Returns a job receipt: read roundtable_job for the answer. Preserve requestId on an uncertain retry. Requires user authorization to initiate discussion.', 'inputSchema':{'type':'object','properties':{'room':{'type':'string'},'member':{'enum':list(MEMBERS)},'text':{'type':'string'},'requestId':{'type':'string','minLength':1,'maxLength':100}},'required':['room','member','text','requestId']}},
+    {'name':'roundtable_execute','description':'Submit an execution task to a configured executor and return a job receipt. Requires explicit user authorization. Peer messages can never trigger execution.', 'inputSchema':{'type':'object','properties':{'room':{'type':'string'},'executor':{'type':'string'},'text':{'type':'string','minLength':1,'maxLength':50000},'requestId':{'type':'string','minLength':1,'maxLength':100}},'required':['room','executor','text','requestId']}},
     {'name':'roundtable_checkpoint','description':'Master: save room-scoped progress for later continuation. Use expectedRevision from context and throughSeq from the last event you actually read. Never infer approval or verified completion. On revision conflict reload context before updating. Does not call models or change their native sessions.', 'inputSchema':{'type':'object','properties':{'room':{'type':'string'},'expectedRevision':{'type':'integer','minimum':0},'goal':{'type':'string','minLength':1,'maxLength':2000},'summary':{'type':'string','maxLength':12000},'openQuestions':{'type':'array','maxItems':30,'items':{'type':'string','minLength':1,'maxLength':1000}},'nextAction':{'type':'string','maxLength':2000},'throughSeq':{'type':'integer','minimum':0}},'required':['room','expectedRevision','goal','summary','openQuestions','nextAction','throughSeq']}},
     {'name': 'roundtable_post', 'description': 'Post to an existing roundtable topic and schedule 1-5 rounds. Reuses each member native conversation. Returns a job id immediately; read roundtable_job for actual answers. Requires user authorization to initiate discussion.', 'inputSchema': {'type':'object','properties':{'room':{'type':'string','description':'Required explicit room ID; never infer a default from another task'},'text':{'type':'string'},'members':{'type':'array','items':{'enum':list(MEMBERS)}},'rounds':{'type':'integer','minimum':1,'maximum':5,'default':1},'requestId':{'type':'string','description':'Reuse this id if retrying an uncertain submission'}},'required':['room','text']}},
     {'name':'roundtable_job','description':'Read a room-scoped job and actual replies. Optionally wait up to 25 seconds for completion without another model call; queued/running remains a receipt. Never resend a consultation to poll.', 'inputSchema':{'type':'object','properties':{'room':{'type':'string'},'id':{'type':'string'},'waitSeconds':{'type':'integer','minimum':0,'maximum':25,'default':0}},'required':['room','id']}},
@@ -47,7 +48,7 @@ def http(path, data=None):
 
 
 def call(name, args):
-    if name in {'roundtable_post', 'roundtable_history', 'roundtable_job', 'roundtable_cancel', 'roundtable_context', 'roundtable_consult', 'roundtable_checkpoint'}:
+    if name in {'roundtable_post', 'roundtable_history', 'roundtable_job', 'roundtable_cancel', 'roundtable_context', 'roundtable_consult', 'roundtable_execute', 'roundtable_checkpoint'}:
         if not isinstance(args.get('room'), str) or not args['room'].strip():
             raise ValueError('Explicit room is required; use roundtable_rooms to choose the intended topic')
     quote = lambda s: urllib.parse.quote(str(s), safe='')
@@ -62,6 +63,11 @@ def call(name, args):
         if any(key not in args for key in fields):
             raise ValueError('Missing required ' + name + ' fields')
         return http('/api/rooms/' + quote(args['room']) + ('/consult' if name == 'roundtable_consult' else '/checkpoint'), {key:args[key] for key in fields})
+    if name == 'roundtable_execute':
+        fields = ('executor', 'text', 'requestId')
+        if any(key not in args for key in fields):
+            raise ValueError('Missing required roundtable_execute fields')
+        return http('/api/rooms/' + quote(args['room']) + '/execute', {key: args[key] for key in fields})
     if name == 'roundtable_post':
         args = dict(args)
         room = args.pop('room')

@@ -9,6 +9,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from settings import EXECUTORS
+
 # 席位可配置：A2A_MEMBERS="codex,claude"。默认保持上游三席。
 _KNOWN_MEMBERS = ("codex", "claude", "zcode")
 MEMBERS = tuple(dict.fromkeys(
@@ -50,6 +52,11 @@ class RoomStore:
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS unique_native_session ON members(native_id) WHERE native_id IS NOT NULL')
             if 'speaker' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute("ALTER TABLE jobs ADD COLUMN speaker TEXT NOT NULL DEFAULT 'user'")
+            job_columns = {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}
+            if 'kind' not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'discuss'")
+            if 'executor' not in job_columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN executor TEXT')
         path.chmod(0o600)
 
     @contextmanager
@@ -129,6 +136,30 @@ class RoomStore:
                 return self.job(key)
             now = time.time()
             db.execute("INSERT INTO jobs(id,room,prompt,members,rounds,state,error,created,updated,speaker) VALUES (?,?,?,?,?,'queued',NULL,?,?,?)", (key, room, prompt, json.dumps(members), rounds, now, now, speaker))
+        return self.job(key)
+
+    def submit_execute(self, room, prompt, executor, key, speaker='master'):
+        self.room(room)
+        if executor not in EXECUTORS:
+            raise ValueError('Executor is not configured')
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError('Supply a nonempty execution prompt')
+        if not isinstance(key, str) or not key:
+            raise ValueError('Request ID is required')
+        if speaker not in {'user', 'master'}:
+            raise ValueError('Invalid scheduling speaker')
+        with self.connect() as db:
+            previous = db.execute('SELECT * FROM jobs WHERE id=?', (key,)).fetchone()
+            if previous:
+                old = (previous['room'], previous['prompt'], previous['executor'], previous['speaker'], previous['kind'])
+                if old != (room, prompt, executor, speaker, 'execute'):
+                    raise ValueError('Request ID already used for different content')
+                return self.job(key)
+            now = time.time()
+            db.execute("""INSERT INTO jobs(
+                id,room,prompt,members,rounds,state,error,created,updated,speaker,kind,executor
+                ) VALUES (?,?,?,'[]',1,'queued',NULL,?,?,?,'execute',?)""",
+                (key, room, prompt, now, now, speaker, executor))
         return self.job(key)
 
     def job(self, key, room=None):
@@ -230,6 +261,19 @@ class RoomStore:
     def finish(self, key, state, error=None):
         with self.connect() as db:
             db.execute("UPDATE jobs SET state=?,error=?,updated=? WHERE id=?", (state, error, time.time(), key))
+
+    def finish_execute(self, key, state, text, error=None):
+        if state not in {'completed', 'failed'}:
+            raise ValueError('Invalid execution terminal state')
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=? AND kind='execute' AND state='running'", (key,)).fetchone()
+            if not row:
+                return False
+            db.execute('INSERT INTO events(room,speaker,text,job,created) VALUES (?,?,?,?,?)',
+                       (row['room'], 'exec:' + row['executor'], text, key, time.time()))
+            db.execute('UPDATE jobs SET state=?,error=?,updated=? WHERE id=?',
+                       (state, error, time.time(), key))
+        return True
 
     def recover(self):
         # An interrupted provider turn may have been billed/committed. Never replay it silently.

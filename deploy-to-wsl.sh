@@ -35,6 +35,7 @@ STAMP="${GIT_HASH}-$(date +%Y%m%d-%H%M%S)"
 
 echo "== rsync $SRC -> $DST =="
 rsync -a --delete \
+  --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
   --exclude .git \
   --exclude venv \
   --exclude data \
@@ -49,6 +50,7 @@ rsync -a --delete \
   --exclude '*.log' \
   --exclude VERSION \
   "$SRC/" "$DST/"
+find "$DST" -maxdepth 1 -name '*.sh' -exec chmod 755 {} +
 printf '%s\n' "$STAMP" > "$DST/VERSION"
 
 echo "== 安装/刷新 systemd 单元 =="
@@ -87,10 +89,12 @@ systemctl start a2a-pi a2a-claude a2a-codex a2a-dsh
 
 echo "== rooms: rsync $REPO/rooms -> /root/a2a-rooms =="
 rsync -a --delete \
+  --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
   --exclude .git --exclude data --exclude __pycache__ --exclude '*.pyc' \
   --exclude logs --exclude '*.db' --exclude '*.log' --exclude .pytest_cache \
   --exclude VERSION --exclude .venv \
   "$REPO/rooms/" /root/a2a-rooms/
+find /root/a2a-rooms -maxdepth 1 -name '*.sh' -exec chmod 755 {} +
 printf '%s\n' "$STAMP" > /root/a2a-rooms/VERSION
 
 cat > /etc/systemd/system/a2a-rooms.service <<UNIT
@@ -107,6 +111,7 @@ WorkingDirectory=/root/a2a-rooms
 Environment=HOME=/root
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=A2A_MEMBERS=codex,claude
+Environment=A2A_EXECUTORS=pi=http://127.0.0.1:10000,claude=http://127.0.0.1:10001,codex=http://127.0.0.1:10002,dsh=http://127.0.0.1:10003
 Environment=A2A_ROOM_DATA=/root/a2a-rooms-data
 Restart=always
 RestartSec=3

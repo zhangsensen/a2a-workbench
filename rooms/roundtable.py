@@ -12,16 +12,50 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import uvicorn
+from a2a.client import A2ACardResolver, ClientConfig, create_client
+from a2a.helpers import new_text_message
+from a2a.types import Role, SendMessageRequest, TaskState
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from room_agents import Member
-from settings import ROOT, DATA, PORT, BASE_URL, VERSION
+from settings import ROOT, DATA, PORT, BASE_URL, VERSION, EXECUTORS
 from room_store import MEMBERS, RoomStore
 
 LOGGER = logging.getLogger('a2a-roundtable')
+
+
+async def call_executor(url, prompt, room):
+    http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    client = None
+    try:
+        card = await A2ACardResolver(httpx_client=http, base_url=url).get_agent_card()
+        client = await create_client(
+            agent=card, client_config=ClientConfig(streaming=False, httpx_client=http)
+        )
+        request = SendMessageRequest(
+            message=new_text_message(prompt, role=Role.ROLE_USER),
+            metadata={'context': room},
+        )
+        parts = []
+        final_state = None
+        async for chunk in client.send_message(request):
+            task = getattr(chunk, 'task', None)
+            status = getattr(task, 'status', None)
+            if status is not None:
+                final_state = status.state
+            for artifact in getattr(task, 'artifacts', []) or []:
+                for part in artifact.parts:
+                    if getattr(part, 'text', ''):
+                        parts.append(part.text)
+        return final_state, '\n'.join(parts) if parts else '(no text returned by executor)'
+    finally:
+        if client is not None:
+            await client.close()
+        await http.aclose()
 
 
 class Discussion:
@@ -35,6 +69,8 @@ class Discussion:
         self.current = None
         self.current_id = None
         self.stopping = False
+        self.execute_locks = {}
+        self.execute_tasks = {}
 
     def member(self, room, name):
         key = (room, name)
@@ -51,7 +87,10 @@ class Discussion:
     async def start(self):
         self.store.create_room('lobby', 'Lobby / 公共圆桌')
         for key in self.store.recover():
-            await self.queue.put(key)
+            if self.store.job(key)['kind'] == 'execute':
+                self._schedule_execute(key)
+            else:
+                await self.queue.put(key)
         # Warm processes without spending tokens on fake conversation turns.
         for room in self.store.rooms():
             await self.warm_room(room['id'])
@@ -74,6 +113,46 @@ class Discussion:
         if job['state'] == 'queued':
             self.queue.put_nowait(job['id'])
         return job
+
+    # 安全不变量：执行 job 只能从外部入口（HTTP/MCP）进来，代码中不存在从成员回复文本到 submit_execute 的任何通路；成员消息处理路径一行都不要碰。
+    def submit_execute(self, room, prompt, executor, key, speaker='master'):
+        job = self.store.submit_execute(room, prompt, executor, key, speaker)
+        if job['state'] == 'queued' and job['id'] not in self.execute_tasks:
+            self._schedule_execute(job['id'])
+        return job
+
+    def _schedule_execute(self, key):
+        # Execute work is deliberately independent of the serial discussion queue.
+        task = asyncio.create_task(self._run_execute(key))
+        self.execute_tasks[key] = task
+        task.add_done_callback(lambda done, job=key: self.execute_tasks.pop(job, None))
+
+    async def _run_execute(self, key):
+        job = self.store.job(key)
+        lock = self.execute_locks.setdefault(job['executor'], asyncio.Lock())
+        async with lock:
+            if not self.store.begin(key):
+                return
+            try:
+                final_state, text = await call_executor(
+                    EXECUTORS[job['executor']], job['prompt'], job['room']
+                )
+                if final_state == TaskState.TASK_STATE_COMPLETED:
+                    self.store.finish_execute(key, 'completed', text)
+                elif final_state == TaskState.TASK_STATE_FAILED:
+                    self.store.finish_execute(key, 'failed', text, text)
+                else:
+                    state = getattr(final_state, 'name', str(final_state))
+                    error = f'Executor ended in unexpected state {state}: {text}'
+                    self.store.finish_execute(key, 'failed', error, error)
+            except asyncio.CancelledError:
+                if self.stopping and self.store.job(key)['state'] == 'running':
+                    self.store.finish(key, 'interrupted', 'Service stopped during execution')
+                raise
+            except Exception as exc:
+                error = str(exc).strip() or f'{type(exc).__name__} during execution'
+                self.store.finish_execute(key, 'failed', error, error)
+                LOGGER.error('job=%s executor=%s failed (%s)', key, job['executor'], type(exc).__name__)
 
     async def _work(self):
         while True:
@@ -136,6 +215,10 @@ class Discussion:
         job = self.store.job(key, room)
         if job['state'] not in {'queued', 'running'}:
             return job
+        if job['kind'] == 'execute':
+            # MVP 不回调 grid cancel；后续补远端取消。
+            self.store.finish(key, 'cancelled')
+            return self.store.job(key)
         if key == self.current_id and self.current:
             self.current.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -150,6 +233,10 @@ class Discussion:
 
     async def close(self):
         self.stopping = True
+        execute_tasks = list(self.execute_tasks.values())
+        for task in execute_tasks:
+            task.cancel()
+        await asyncio.gather(*execute_tasks, return_exceptions=True)
         for task in (self.keeper, self.worker):
             if task:
                 task.cancel()
@@ -172,6 +259,12 @@ class MessageInput(BaseModel):
 
 class ConsultInput(BaseModel):
     member: str = Field(pattern='^(' + '|'.join(re.escape(m) for m in MEMBERS) + ')$')
+    text: str = Field(min_length=1, max_length=50000)
+    requestId: str = Field(min_length=1, max_length=100)
+
+
+class ExecuteInput(BaseModel):
+    executor: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=50000)
     requestId: str = Field(min_length=1, max_length=100)
 
@@ -271,6 +364,11 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
     async def consult(room: str, body: ConsultInput):
         # The calling model is the master. One selected peer replies once, then control returns.
         return discussion.submit(room, body.text, [body.member], 1, body.requestId, speaker='master')
+
+    @app.post('/api/rooms/{room}/execute')
+    async def execute(room: str, body: ExecuteInput):
+        # This explicit external entry point is the only route from HTTP into execution.
+        return discussion.submit_execute(room, body.text, body.executor, body.requestId)
 
     @app.get('/api/rooms/{room}/context')
     async def master_context(room: str, after: int | None = None, limit: int = 50):
