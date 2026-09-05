@@ -1,0 +1,21 @@
+[project]
+name = "a2a-roundtable"
+version = "0.3.0"
+description = "Persistent local A2A roundtables with isolated rooms for Codex, Claude Code, and ZCode"
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "a2a-sdk[fastapi,sqlite]>=1.0,<2",
+  "httpx>=0.28,<1",
+  "uvicorn>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,20 @@
+# 运行时/环境（不进版本库）
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.log
+VERSION
+
+# grid 运行时产物
+grid/data/
+grid/rooms/
+grid/tmp/
+grid/.a2a-payloads/
+
+# rooms 运行时产物
+rooms/data/
+
+# 一次性诊断脚本
+.diag_cmd*.sh
