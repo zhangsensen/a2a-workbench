@@ -49,6 +49,7 @@ async def call_agent(
     streaming: bool = False,
     model: str | None = None,
     provider: str | None = None,
+    cwd: str | None = None,
 ) -> str:
     catalog = load_catalog()
     target = next((a for a in catalog["agents"] if a["name"] == name), None)
@@ -63,11 +64,14 @@ async def call_agent(
             agent=card, client_config=ClientConfig(streaming=streaming, httpx_client=hc)
         )
         # 模型选择走请求元数据（A2A 原生通道），由执行器白名单校验后透传。
+        # cwd 把执行钉到指定工作区（如 git worktree），并行派活互不踩踏。
         meta: dict[str, str] = {}
         if model:
             meta["model"] = model
         if provider:
             meta["provider"] = provider
+        if cwd:
+            meta["cwd"] = cwd
         request = SendMessageRequest(
             message=new_text_message(text, role=Role.ROLE_USER),
             metadata=meta or None,
@@ -96,6 +100,7 @@ if __name__ == "__main__":
     args = [a for a in args if a != "--stream"]
     model = None
     provider = None
+    cwd = None
     if "--model" in args:
         i = args.index("--model")
         if i + 1 < len(args):
@@ -106,8 +111,13 @@ if __name__ == "__main__":
         if i + 1 < len(args):
             provider = args[i + 1]
             del args[i:i + 2]
+    if "--cwd" in args:
+        i = args.index("--cwd")
+        if i + 1 < len(args):
+            cwd = args[i + 1]
+            del args[i:i + 2]
     if len(args) < 2:
-        raise SystemExit('用法：python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>]\n      python a2a_call.py --list')
+        raise SystemExit('用法：python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>] [--cwd <目录>]\n      python a2a_call.py --list')
     agent_name, message = args[0], args[1]
     reply = asyncio.run(
         call_agent(
@@ -116,6 +126,7 @@ if __name__ == "__main__":
             streaming=use_stream,
             model=model,
             provider=provider,
+            cwd=cwd,
         )
     )
     print(reply)

@@ -23,6 +23,7 @@ import os
 import re
 import signal
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from a2a.helpers import (
@@ -142,11 +143,14 @@ class SubprocessAgentExecutor(AgentExecutor):
             kept=MAX_OUTPUT, total=len(text)
         )
 
-    def _popen(self, q: str, extra_args: list[str] | None = None) -> "subprocess.Popen[bytes]":
+    def _popen(self, q: str, extra_args: list[str] | None = None,
+               cwd: str | None = None) -> "subprocess.Popen[bytes]":
         """按子类声明的转义策略启动子进程。
 
         ``extra_args`` 由执行器层的元数据（如请求指定模型/provider）透传而来，
         追加到 ``ARGS_PREFIX`` 之后、用户查询之前；默认为空，行为不变。
+        ``cwd`` 把子进程钉到指定工作目录（如某个 git worktree），并行任务
+        各占一个 worktree 时互不踩踏；None 保持服务默认目录。
         """
         prefix = [*self.ARGS_PREFIX, *(extra_args or [])]
         if self.USE_SHELL and IS_WINDOWS:
@@ -160,7 +164,7 @@ class SubprocessAgentExecutor(AgentExecutor):
                 cmd = subprocess.list2cmdline([self.BIN, *prefix])
                 return subprocess.Popen(
                     cmd, shell=True, stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd,
                     creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
                 )
             # dsh 这类必须 task 作为位置参数的：显式加双引号，
@@ -169,6 +173,7 @@ class SubprocessAgentExecutor(AgentExecutor):
             cmd = subprocess.list2cmdline([self.BIN, *prefix, safe_q])
             return subprocess.Popen(
                 cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=cwd,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
         # 真 exe（Windows）或任意 POSIX 平台：参数列表直接 exec，免 shell 注入。
@@ -178,6 +183,7 @@ class SubprocessAgentExecutor(AgentExecutor):
         popen_kwargs: dict[str, Any] = dict(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cwd=cwd,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             start_new_session=not IS_WINDOWS,
         )
@@ -187,17 +193,47 @@ class SubprocessAgentExecutor(AgentExecutor):
             )
         return subprocess.Popen([self.BIN, *prefix, q], **popen_kwargs)
 
-    def _run(self, query: str, extra_args: list[str] | None = None) -> str:
+    # cwd 只做输入卫生校验，不是权限边界：四个 CLI 本身全权限、可访问任意
+    # 路径；服务仅监听回环。校验目的：拒绝控制字符/相对路径/不存在的目录，
+    # 让"钉错工作区"在提交时响亮失败，而不是默默跑在服务目录里。
+    MAX_CWD_LEN = 500
+
+    @classmethod
+    def _validated_cwd(cls, value: Any) -> str | None:
+        """校验元数据里的 cwd：缺省返回 None；给了但非法必须响亮拒绝。
+
+        一个"在 worktree X 写代码"的任务如果静默落在默认目录执行，等于在
+        错误的地方动手 —— 比拒绝危险得多，所以非法值抛 ``ExecutorFailure``。
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ExecutorFailure("(cwd 无效: 必须是非空字符串)")
+        if any(ch < " " for ch in value):
+            raise ExecutorFailure("(cwd 无效: 含控制字符/以-开头/超长)")
+        v = value.strip()
+        if len(v) > cls.MAX_CWD_LEN or v.startswith("-"):
+            raise ExecutorFailure("(cwd 无效: 含控制字符/以-开头/超长)")
+        path = Path(v)
+        if not path.is_absolute():
+            raise ExecutorFailure(f"(cwd 无效: 必须是绝对路径: {v})")
+        if not path.is_dir():
+            raise ExecutorFailure(f"(cwd 无效: 目录不存在: {v})")
+        return str(path)
+
+    def _run(self, query: str, extra_args: list[str] | None = None,
+             cwd_request: Any = None) -> str:
         """同步执行子进程，返回文本结果（在 asyncio.to_thread 里跑）。
 
         失败一律抛 ``ExecutorFailure``，由 ``execute`` 落成 FAILED 终态。
         """
         q = self._sanitize(query)
+        cwd = self._validated_cwd(cwd_request)
         # stdin 传参在两个平台统一生效（Windows shell 分支与 POSIX exec 分支
         # 都为 QUERY_VIA_STDIN 打开了 stdin=PIPE）。
         stdin_payload = q.encode("utf-8") if self.QUERY_VIA_STDIN else None
         try:
-            proc = self._popen(q, extra_args)
+            proc = self._popen(q, extra_args, cwd)
         except Exception as e:  # noqa: BLE001
             raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
 
@@ -215,9 +251,16 @@ class SubprocessAgentExecutor(AgentExecutor):
             raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
 
         out = self._clip_output(stdout.decode("utf-8", errors="replace").strip())
+        err = stderr.decode("utf-8", errors="replace").strip()
+        # 非零退出码是失败，即使 stdout 有内容——CLI 报错时常带部分输出，
+        # 把它当成功答案返回会让调用方拿着半截结果继续走（旧行为，真 bug）。
+        if proc.returncode:
+            raise ExecutorFailure(
+                f"(退出码 {proc.returncode}) stderr: {err[:1000]}\n"
+                f"stdout: {out[:2000]}"
+            )
         if out:
             return out
-        err = stderr.decode("utf-8", errors="replace").strip()
         return f"(无输出) stderr: {err[:500]}"
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -234,10 +277,12 @@ class SubprocessAgentExecutor(AgentExecutor):
         )
 
         query = get_message_text(context.message)
-        # 执行器层透传：请求元数据（如 model/provider）→ 追加到命令参数。
+        # 执行器层透传：请求元数据（如 model/provider）→ 追加到命令参数；
+        # cwd 原样传入 _run，由 _validated_cwd 决定接受或响亮拒绝。
         extra_args = self._executor_args_from_metadata(context.metadata)
+        cwd_request = context.metadata.get("cwd") if isinstance(context.metadata, dict) else None
         try:
-            result = await asyncio.to_thread(self._run, query, extra_args)
+            result = await asyncio.to_thread(self._run, query, extra_args, cwd_request)
         except ExecutorFailure as failure:
             # 终态可取回：原因既写成 artifact，也写进 status message，
             # 状态是诚实的 FAILED。

@@ -46,6 +46,7 @@ class CodexPayloadTransportTests(unittest.TestCase):
                 self.stderr = None
                 self.sent = None
                 self.timeout = None
+                self.returncode = 0
 
             def communicate(self, input=None, timeout=None):  # noqa: A002
                 self.sent = input
