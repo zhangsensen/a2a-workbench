@@ -53,7 +53,7 @@ Custom ─┘
 | 维度 | 传统 subagent | A2A Workbench |
 |---|---|---|
 | 拓扑 | 父子树 | 开放的 Agent 网络 |
-| 所有权 | 子 Agent 属于创建它的父 Agent | Agent 独立注册，可被授权参与多个任务 |
+| 所有权 | 子 Agent 属于创建它的父 Agent | Agent 独立运行，可被任何协作方发现和调用 |
 | 发现 | 父 Agent 内部私有 | 通过 A2A Agent Card / registry 发现 |
 | 上下文 | 父 Agent分发，结果向上汇总 | 项目房间和事件流共享，按 cursor 增量读取 |
 | 并行写入 | 常共享同一工作树，容易覆盖 | 每个执行任务使用隔离 workspace/worktree |
@@ -209,7 +209,7 @@ Core 不硬编码 `pi/claude/codex/dsh`。Agent 通过 registry 注册：
 }
 ```
 
-一个 Agent 是独立地址和能力集合，不是某个调用者的私有子节点。任意获得权限的 Agent 都可以：
+一个 Agent 是独立地址和能力集合，不是某个调用者的私有子节点。任意已接入 Workbench 的 Agent 都可以：
 
 - 发现其他 Agent；
 - 请求协作；
@@ -217,7 +217,7 @@ Core 不硬编码 `pi/claude/codex/dsh`。Agent 通过 registry 注册：
 - 引用已有 task/event；
 - 请求创建后续任务。
 
-但“开放”不等于“任何消息都能直接执行”。请求可以来自任意 Agent，是否调度执行由任务权限和项目策略决定。
+首版是本机开发工具，不建设账号、登录、租户、OAuth、mTLS 或复杂授权系统。开放指协议和 Agent 拓扑开放，不指建设用户系统。安全边界沿用本机进程与现有 CLI 权限；唯一需要保留的规则是：Agent 不能通过一段聊天文本把自己升级成集成者或绕过工作区边界。
 
 ### 首发适配器层次
 
@@ -255,7 +255,6 @@ depends_on
 write_scopes / resource_scopes
 workspace_id
 request_id / request_hash
-authorization
 ```
 
 ### Attempt
@@ -380,14 +379,28 @@ queued → preparing_workspace → dispatching → running
 4. 本机 WSL、绝对路径、私有 Agent 和模型配置放入 ignored local overlay。
 5. 最终本机也安装公开包，不维护另一套运行源码。
 
-## 12. 开源路线图
+## 12. 明确不做的事情
+
+首版不做以下内容，因为它们不能直接缩短开发交付时间：
+
+- 登录、账号、租户和用户体系；
+- OAuth、SSO、RBAC、mTLS 和公网 federation；
+- 复杂审批流和 capability token；
+- 长期知识库、向量记忆和组织治理；
+- 为展示而做的大型 Web IDE；
+- 无边界的自动递归 spawn；
+- 重写已有成熟 CLI 的认证和模型调用。
+
+Workbench 直接使用用户已经安装并可运行的 Agent CLI。配置只回答三个问题：Agent 命令是什么、能力是什么、最大并发是多少。
+
+## 13. 开源路线图
 
 ### M0：陌生用户可运行
 
 - 确定公开仓库、项目名和 package layout。
 - 清除个人路径和固定 Agent 假设。
 - Windows/Linux/macOS 可 import、测试和运行核心服务。
-- 提供 fake/echo A2A workers，不登录模型也能完成 demo。
+- 提供 fake/echo A2A workers，使 demo 不依赖用户已安装某个具体 Agent。
 - 建立 CLI：`workbench init / agent add / project add / room create / task submit / status`。
 
 验收：陌生用户 clone 后按 README，在十分钟内看到两个 fake worker 并行完成互不覆盖的任务。
@@ -433,7 +446,7 @@ queued → preparing_workspace → dispatching → running
 
 验收：多 Agent 并行开发后，只有通过验收的 commit 能进入集成队列，目标分支不会被并发覆盖。
 
-## 13. 首屏价值表达建议
+## 14. 首屏价值表达建议
 
 > **Open collaboration for coding agents.**  
 > Connect independent agents through A2A, let them develop in parallel workspaces, and integrate verified results without overwriting each other's work.
@@ -449,7 +462,7 @@ queued → preparing_workspace → dispatching → running
 - **Parallel, without overwrite**：写任务默认隔离，成果通过受控集成进入主线。
 - **Durable and verifiable**：任务、上下文、状态和证据可恢复、可追踪。
 
-## 14. 完成定义
+## 15. 完成定义
 
 项目融合完成的标准不是本机四个端口都在线，而是：
 
