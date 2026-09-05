@@ -18,3 +18,4 @@ rooms/data/
 
 # 一次性诊断脚本
 .diag_cmd*.sh
+references/
