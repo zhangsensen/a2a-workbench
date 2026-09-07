@@ -109,6 +109,7 @@ class DSHExecutor(SubprocessAgentExecutor):
         except ValueError as exc:
             raise ExecutorFailure(f"(输入过长: {exc})") from exc
 
+        run_entry = entry if entry is not None else _ProcessEntry()
         try:
             with self._payload_file(payload) as path:
                 bridge = (
@@ -117,6 +118,8 @@ class DSHExecutor(SubprocessAgentExecutor):
                     "directly from that file. This file is transport-only; do not modify "
                     "or delete it, and do not ask for the task again. Return the task result."
                 )
+                if run_entry.cancelled:
+                    raise ExecutorFailure("(任务已取消，未启动子进程)")
                 if IS_WINDOWS:
                     # .cmd shim 需要 shell；bridge 是固定文本（含临时文件路径），
                     # 不含用户可控内容，list2cmdline 转义足够。
@@ -138,8 +141,13 @@ class DSHExecutor(SubprocessAgentExecutor):
                         cwd=cwd,
                         start_new_session=True,
                     )
-                run_entry = entry if entry is not None else _ProcessEntry()
-                self._register_process(task_id, proc, run_entry)
+                if self._register_process(task_id, proc, run_entry):
+                    try:
+                        self._kill_process_tree(proc)
+                        self._reap_after_kill(proc)
+                    finally:
+                        self._clear_process(proc, run_entry)
+                    raise ExecutorFailure("(任务已取消，子进程已终止)")
                 try:
                     try:
                         stdout, stderr = proc.communicate(timeout=self.TIMEOUT)
@@ -155,7 +163,7 @@ class DSHExecutor(SubprocessAgentExecutor):
                             f"(调用超时 >{self.TIMEOUT}s)"
                         ) from None
                 finally:
-                    self._take_process(task_id, expected=run_entry)
+                    self._clear_process(proc, run_entry)
         except ExecutorFailure:
             raise
         except Exception as exc:  # noqa: BLE001

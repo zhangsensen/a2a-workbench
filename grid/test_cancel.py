@@ -3,6 +3,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,7 +82,7 @@ class TestCancel(unittest.TestCase):
                     entry = SubprocessAgentExecutor._running_processes.get(
                         "slow-task"
                     )
-                    if entry is not None:
+                    if entry is not None and entry.process is not None:
                         process = entry.process
                         break
                 await asyncio.sleep(0.01)
@@ -105,6 +106,101 @@ class TestCancel(unittest.TestCase):
         self.assertEqual(updater.artifacts, [])
         with SubprocessAgentExecutor._running_processes_lock:
             self.assertNotIn("slow-task", SubprocessAgentExecutor._running_processes)
+
+    def test_cancel_before_spawn_never_calls_popen(self):
+        updater = _Updater()
+        sanitize_started = threading.Event()
+        allow_sanitize = threading.Event()
+
+        class _BlockedBeforeSpawnShim(_FastShim):
+            def _sanitize(self, text: str) -> str:
+                sanitize_started.set()
+                self.assert_allow_sanitize()
+                return super()._sanitize(text)
+
+            @staticmethod
+            def assert_allow_sanitize() -> None:
+                if not allow_sanitize.wait(timeout=5):
+                    raise AssertionError("test did not release sanitize")
+
+        executor = _BlockedBeforeSpawnShim()
+
+        async def scenario():
+            execution = asyncio.create_task(
+                executor.execute(_execute_context("pre-spawn-task"), object())
+            )
+            for _ in range(300):
+                if sanitize_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(sanitize_started.is_set())
+
+            await executor.cancel(_cancel_context("pre-spawn-task"), object())
+            allow_sanitize.set()
+            await asyncio.wait_for(execution, timeout=5)
+
+        with self._patch_reporting(updater), patch.object(
+            se.subprocess, "Popen"
+        ) as popen:
+            asyncio.run(scenario())
+
+        popen.assert_not_called()
+        self.assertEqual(
+            [state for state, _ in updater.states],
+            [
+                se.TaskState.TASK_STATE_WORKING,
+                se.TaskState.TASK_STATE_CANCELED,
+            ],
+        )
+        self.assertEqual(updater.artifacts, [])
+
+    def test_cancel_while_popen_returns_kills_spawned_process_tree(self):
+        updater = _Updater()
+        popen_started = threading.Event()
+        allow_popen_return = threading.Event()
+        process = SimpleNamespace(pid=1234)
+        executor = _FastShim()
+
+        def delayed_popen(*_args, **_kwargs):
+            popen_started.set()
+            if not allow_popen_return.wait(timeout=5):
+                raise AssertionError("test did not release Popen")
+            return process
+
+        async def scenario():
+            execution = asyncio.create_task(
+                executor.execute(_execute_context("during-spawn-task"), object())
+            )
+            for _ in range(300):
+                if popen_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(popen_started.is_set())
+
+            await executor.cancel(_cancel_context("during-spawn-task"), object())
+            allow_popen_return.set()
+            await asyncio.wait_for(execution, timeout=5)
+
+        with self._patch_reporting(updater), patch.object(
+            se.subprocess, "Popen", side_effect=delayed_popen
+        ) as popen, patch.object(
+            executor, "_kill_process_tree"
+        ) as kill_tree, patch.object(
+            executor, "_reap_after_kill"
+        ) as reap:
+            asyncio.run(scenario())
+
+        popen.assert_called_once()
+        kill_tree.assert_called_once_with(process)
+        reap.assert_called_once_with(process)
+        self.assertEqual(
+            [state for state, _ in updater.states],
+            [
+                se.TaskState.TASK_STATE_WORKING,
+                se.TaskState.TASK_STATE_CANCELED,
+            ],
+        )
+        self.assertEqual(updater.artifacts, [])
 
     def test_cancel_after_natural_exit_is_quiet(self):
         updater = _Updater()

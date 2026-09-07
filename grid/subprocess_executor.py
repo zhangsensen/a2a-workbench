@@ -68,6 +68,10 @@ class ExecutorTimeout(ExecutorFailure):
     """子进程超时，且进程树已被终止。"""
 
 
+class SessionNotFound(ExecutorFailure):
+    """CLI 明确报告待恢复的原生会话不存在。"""
+
+
 @dataclass
 class _ProcessEntry:
     """一次 execute 调用与其子进程之间共享的取消状态。"""
@@ -107,6 +111,12 @@ class SubprocessAgentExecutor(AgentExecutor):
     # context 不是安全边界，只是会话路由键：服务仅监听回环，执行手本身拥有
     # 全权限。这里的白名单用于拒绝歧义/失控的存储键，而不是权限隔离。
     _CONTEXT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+    _SESSION_NOT_FOUND_MARKERS = (
+        "session not found",
+        "no conversation found",
+        "thread not found",
+        "no such session",
+    )
 
     @classmethod
     def _validated_context(cls, value: Any) -> str | None:
@@ -169,13 +179,32 @@ class SubprocessAgentExecutor(AgentExecutor):
         task_id: str | None,
         process: "subprocess.Popen[bytes]",
         entry: _ProcessEntry,
+    ) -> bool:
+        """原子发布已启动进程，并返回此前是否已经收到取消。"""
+        # entry 已由 execute 在 spawn 前按 task_id 注册；保留参数以让所有
+        # 子类沿用同一发布接口。
+        with SubprocessAgentExecutor._running_processes_lock:
+            entry.process = process
+            return entry.cancelled
+
+    @classmethod
+    def _register_entry(
+        cls, task_id: str | None, entry: _ProcessEntry
     ) -> None:
-        """Popen 成功后才把进程发布给 cancel。"""
-        entry.process = process
+        """在 spawn 前发布运行条目，使 cancel 不会漏掉启动窗口。"""
         if task_id is None:
             return
         with SubprocessAgentExecutor._running_processes_lock:
             SubprocessAgentExecutor._running_processes[task_id] = entry
+
+    @classmethod
+    def _clear_process(
+        cls, process: "subprocess.Popen[bytes]", entry: _ProcessEntry
+    ) -> None:
+        """进程回收后清空引用，但保留 execute 级运行条目。"""
+        with SubprocessAgentExecutor._running_processes_lock:
+            if entry.process is process:
+                entry.process = None
 
     @classmethod
     def _take_process(
@@ -358,13 +387,22 @@ class SubprocessAgentExecutor(AgentExecutor):
         # stdin 传参在两个平台统一生效（Windows shell 分支与 POSIX exec 分支
         # 都为 QUERY_VIA_STDIN 打开了 stdin=PIPE）。
         stdin_payload = q.encode("utf-8") if self.QUERY_VIA_STDIN else None
+        run_entry = entry if entry is not None else _ProcessEntry()
+        if run_entry.cancelled:
+            raise ExecutorFailure("(任务已取消，未启动子进程)")
         try:
             proc = self._popen(q, extra_args, cwd)
         except Exception as e:  # noqa: BLE001
             raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
 
-        run_entry = entry if entry is not None else _ProcessEntry()
-        self._register_process(task_id, proc, run_entry)
+        if self._register_process(task_id, proc, run_entry):
+            try:
+                self._kill_process_tree(proc)
+                self._reap_after_kill(proc)
+            finally:
+                self._clear_process(proc, run_entry)
+            raise ExecutorFailure("(任务已取消，子进程已终止)")
+
         try:
             try:
                 stdout, stderr = proc.communicate(
@@ -381,16 +419,28 @@ class SubprocessAgentExecutor(AgentExecutor):
                     self._reap_after_kill(proc)
                 raise ExecutorFailure(f"(调用失败: {type(e).__name__}: {e})") from e
         finally:
-            # 若 cancel 已先取走条目，这里得到 None；本地 run_entry 仍保留其
-            # cancelled 标志，供 execute 在 asyncio.to_thread 返回后检查。
-            self._take_process(task_id, expected=run_entry)
+            self._clear_process(proc, run_entry)
 
-        out = self._clip_output(stdout.decode("utf-8", errors="replace").strip())
-        err = stderr.decode("utf-8", errors="replace").strip()
+        stdout_text = stdout.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+        out = self._clip_output(stdout_text)
+        err = stderr_text
         # 非零退出码是失败，即使 stdout 有内容——CLI 报错时常带部分输出，
         # 把它当成功答案返回会让调用方拿着半截结果继续走（旧行为，真 bug）。
         if proc.returncode:
-            raise ExecutorFailure(
+            failure_type = ExecutorFailure
+            combined_output = f"{stdout_text}\n{stderr_text}".lower()
+            is_resume = bool(
+                self.RESUME_FLAG
+                and extra_args
+                and self.RESUME_FLAG in extra_args
+            )
+            if is_resume and any(
+                marker in combined_output
+                for marker in self._SESSION_NOT_FOUND_MARKERS
+            ):
+                failure_type = SessionNotFound
+            raise failure_type(
                 f"(退出码 {proc.returncode}) stderr: {err[:1000]}\n"
                 f"stdout: {out[:2000]}"
             )
@@ -433,13 +483,9 @@ class SubprocessAgentExecutor(AgentExecutor):
                     task_id,
                     entry,
                 )
-            except ExecutorTimeout:
-                # 超时不代表会话失效：换新会话重试只会再烧一轮 TIMEOUT，
-                # 且任务本身可能有副作用。直接上抛，让调用方决定。
-                raise
-            except ExecutorFailure:
-                # 原生 CLI 的历史会话可能已被人工清理。resume 失败时只重试
-                # 一次全新会话；新建路径（含 contextReset）失败则直接上抛。
+            except SessionNotFound:
+                # 只有 CLI 明确报告会话不存在时才 fresh retry。超时、普通
+                # 非零退出、权限或网络失败均直接上抛，避免重复副作用。
                 if not is_resume or entry.cancelled:
                     raise
                 native_id = str(uuid.uuid4())
@@ -462,13 +508,13 @@ class SubprocessAgentExecutor(AgentExecutor):
             await event_queue.enqueue_event(task)
 
         updater = TaskUpdater(event_queue=event_queue, task_id=task.id, context_id=task.context_id)
-        await updater.update_status(
-            state=TaskState.TASK_STATE_WORKING,
-            message=new_text_message(self.WORKING_TEXT),
-        )
-
         entry = _ProcessEntry()
+        self._register_entry(task.id, entry)
         try:
+            await updater.update_status(
+                state=TaskState.TASK_STATE_WORKING,
+                message=new_text_message(self.WORKING_TEXT),
+            )
             query = get_message_text(context.message)
             metadata = context.metadata if isinstance(context.metadata, dict) else {}
             # 执行器层透传：请求元数据（如 model/provider）→ 追加到命令参数；
@@ -488,7 +534,7 @@ class SubprocessAgentExecutor(AgentExecutor):
                 entry,
             )
         except ExecutorFailure as failure:
-            if entry.cancelled:
+            if self._take_process(task.id, expected=entry) is None:
                 return
             # 终态可取回：原因既写成 artifact，也写进 status message，
             # 状态是诚实的 FAILED。
@@ -499,7 +545,7 @@ class SubprocessAgentExecutor(AgentExecutor):
             )
             return
         except Exception as exc:  # noqa: BLE001
-            if entry.cancelled:
+            if self._take_process(task.id, expected=entry) is None:
                 return
             # 任何未预期异常也必须落终态：否则任务永远停在 WORKING，
             # 调用方既拿不到结果也不知道该不该重试（执行器被无限占用）。
@@ -511,7 +557,7 @@ class SubprocessAgentExecutor(AgentExecutor):
             )
             return
 
-        if entry.cancelled:
+        if self._take_process(task.id, expected=entry) is None:
             return
         await updater.add_artifact(parts=[new_text_part(text=result)])
         await updater.update_status(
@@ -568,7 +614,7 @@ class SubprocessAgentExecutor(AgentExecutor):
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         entry = self._take_process(context.task_id, cancelled=True)
         if entry is None:
-            # 已自然结束，或尚未启动子进程；两种情况都不制造第二个终态。
+            # execute 已取得终态写入权，或任务从未在本进程运行；不双写终态。
             return
 
         process = entry.process

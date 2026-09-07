@@ -65,8 +65,17 @@ printf '\n' >> "$args_log"
 printf 'start\n' >> "$events_log"
 if [ "${1-}" = "--resume" ] && [ -f "$fail_resume" ]; then
     printf 'end\n' >> "$events_log"
-    printf 'missing native session\n' >&2
-    exit 9
+    failure=$(cat "$fail_resume")
+    if [ "$failure" = "session" ]; then
+        printf 'SeSsIoN NoT FoUnD\n' >&2
+        exit 9
+    fi
+    if [ "$failure" = "timeout" ]; then
+        sleep 5
+        exit 9
+    fi
+    printf 'permission denied\n' >&2
+    exit 1
 fi
 if [ -f "$sleep_marker" ]; then sleep 0.2; fi
 printf 'end\n' >> "$events_log"
@@ -82,6 +91,7 @@ printf 'ok\n'
             str(self.sleep_marker),
         ]
         _SessionShim.SESSION_DB_DIR = self.root / "data"
+        _SessionShim.TIMEOUT = 600
         with SubprocessAgentExecutor._context_locks_lock:
             SubprocessAgentExecutor._context_locks.clear()
 
@@ -151,10 +161,10 @@ printf 'ok\n'
             f"[--resume][{native_id}][second]",
         )
 
-    def test_failed_resume_retries_with_fresh_session_and_overwrites_db(self):
+    def test_session_not_found_retries_once_with_fresh_session(self):
         self._execute("first-task", "first", {"context": "project-3"})
         old_id, _ = self._stored_id("project-3")
-        self.fail_resume.touch()
+        self.fail_resume.write_text("session", encoding="utf-8")
 
         updater = self._execute("retry-task", "retry", {"context": "project-3"})
 
@@ -168,6 +178,40 @@ printf 'ok\n'
         self.assertEqual(new_id, match.group(1))
         self.assertNotEqual(new_id, old_id)
         self.assertEqual(updater.states[-1][0], se.TaskState.TASK_STATE_COMPLETED)
+
+    def test_ordinary_nonzero_resume_failure_does_not_retry(self):
+        self._execute("first-task", "first", {"context": "ordinary"})
+        old_id, _ = self._stored_id("ordinary")
+        self.fail_resume.write_text("ordinary", encoding="utf-8")
+
+        updater = self._execute(
+            "ordinary-failure-task", "retry", {"context": "ordinary"}
+        )
+
+        lines = self._lines(self.args_log)
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[1], f"[--resume][{old_id}][retry]")
+        self.assertEqual(self._stored_id("ordinary")[0], old_id)
+        self.assertEqual(updater.states[-1][0], se.TaskState.TASK_STATE_FAILED)
+        self.assertIn("permission denied", updater.artifacts[-1][0])
+
+    def test_resume_timeout_does_not_retry(self):
+        self._execute("first-task", "first", {"context": "timeout"})
+        old_id, _ = self._stored_id("timeout")
+        self.fail_resume.write_text("timeout", encoding="utf-8")
+        _SessionShim.TIMEOUT = 0.05
+
+        updater = self._execute(
+            "timeout-task", "retry", {"context": "timeout"}
+        )
+
+        self.assertEqual(len(self._lines(self.args_log)), 2)
+        self.assertEqual(
+            self._lines(self.args_log)[1], f"[--resume][{old_id}][retry]"
+        )
+        self.assertEqual(self._stored_id("timeout")[0], old_id)
+        self.assertEqual(updater.states[-1][0], se.TaskState.TASK_STATE_FAILED)
+        self.assertIn("调用超时", updater.artifacts[-1][0])
 
     def test_fresh_context_skips_resume_and_overwrites_db(self):
         self._execute("first-task", "first", {"context": "project-4"})
