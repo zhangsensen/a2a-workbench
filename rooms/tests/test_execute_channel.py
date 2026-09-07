@@ -28,6 +28,10 @@ def test_store_migrates_event_metadata_and_tracks_attempts(tmp_path, monkeypatch
         db.execute('''CREATE TABLE events (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT NOT NULL,
             speaker TEXT NOT NULL, text TEXT NOT NULL, job TEXT, created REAL NOT NULL)''')
+        db.execute('''CREATE TABLE execution_attempts (
+            job TEXT NOT NULL, attempt INTEGER NOT NULL, endpoint TEXT NOT NULL,
+            remote_task_id TEXT, state TEXT NOT NULL, created REAL NOT NULL,
+            updated REAL NOT NULL, PRIMARY KEY(job,attempt))''')
     configure(monkeypatch, {'codex': 'http://127.0.0.1:10002'})
     store = RoomStore(path)
     store.create_room('lobby', 'Lobby')
@@ -36,8 +40,15 @@ def test_store_migrates_event_metadata_and_tracks_attempts(tmp_path, monkeypatch
     assert store.add_attempt('exec', 'endpoint-2') == 2
     store.set_attempt_remote('exec', 2, 'remote-2')
     store.set_attempt_state('exec', 2, 'working')
-    assert store.latest_attempt('exec')['remote_task_id'] == 'remote-2'
-    assert store.latest_attempt('exec')['state'] == 'working'
+    attempt = store.latest_attempt('exec')
+    assert attempt['remote_task_id'] == 'remote-2'
+    assert attempt['state'] == 'working'
+    assert attempt['last_checked_at'] is None
+    assert attempt['reconcile_count'] == 0
+    store.record_reconcile_check('exec', 2)
+    attempt = store.latest_attempt('exec')
+    assert attempt['last_checked_at'] is not None
+    assert attempt['reconcile_count'] == 1
     assert store.begin('exec')
     assert store.events('lobby')[0]['metadata'] is None
     assert store.job('exec')['events'][0]['metadata'] is None
@@ -155,6 +166,44 @@ def test_executor_exception_flows_to_failed_event(tmp_path, monkeypatch):
         assert result['state'] == 'failed'
         assert result['error'] == 'executor unavailable'
         assert result['events'][-1]['text'] == 'executor unavailable'
+
+
+def test_executor_exception_after_remote_id_is_unknown_and_not_reexecuted(
+    tmp_path, monkeypatch
+):
+    configure(monkeypatch, {'codex': 'http://127.0.0.1:10002'})
+    calls = 0
+
+    async def fake_call(url, prompt, room, cwd, on_task_id):
+        nonlocal calls
+        calls += 1
+        await on_task_id('remote-uncertain')
+        raise ConnectionError('connection dropped')
+
+    monkeypatch.setattr(roundtable, 'call_executor', fake_call)
+
+    async def scenario():
+        discussion = Discussion(RoomStore(tmp_path / 'rooms.sqlite3'), FakeMember)
+        await discussion.start()
+        try:
+            discussion.submit_execute('lobby', 'Run', 'codex', 'uncertain')
+            async with asyncio.timeout(2):
+                while discussion.store.job('uncertain')['state'] != 'outcome_unknown':
+                    await asyncio.sleep(.001)
+            result = discussion.store.job('uncertain')
+            assert 'communication failed' in result['error']
+            assert 'reconciliation required' in result['error']
+            await asyncio.sleep(.05)
+            assert calls == 1
+            with discussion.store.connect() as db:
+                assert db.execute(
+                    'SELECT COUNT(*) FROM execution_attempts WHERE job=?',
+                    ('uncertain',),
+                ).fetchone()[0] == 1
+        finally:
+            await discussion.close()
+
+    asyncio.run(scenario())
 
 
 def test_execute_request_id_is_idempotent(tmp_path, monkeypatch):
@@ -381,13 +430,18 @@ def test_restart_reconciliation_completes_remote_execution(tmp_path, monkeypatch
         discussion = Discussion(RoomStore(store.path), FakeMember)
         await discussion.start()
         try:
-            await discussion.reconcile_task
+            async with asyncio.timeout(2):
+                while discussion.store.job('recover-complete')['state'] != 'completed':
+                    await asyncio.sleep(.01)
             result = discussion.store.job('recover-complete')
             assert result['state'] == 'completed'
             assert result['events'][-1]['text'] == 'recovered result'
             metadata = json.loads(result['events'][-1]['metadata'])
             assert metadata['remote_task_id'] == 'remote-complete'
             assert metadata['attempt'] == 1
+            attempt = discussion.store.latest_attempt('recover-complete')
+            assert attempt['reconcile_count'] == 1
+            assert attempt['last_checked_at'] is not None
         finally:
             await discussion.close()
 
@@ -408,11 +462,69 @@ def test_restart_reconciliation_keeps_unknown_when_lookup_fails(tmp_path, monkey
         discussion = Discussion(RoomStore(store.path), FakeMember)
         await discussion.start()
         try:
-            await discussion.reconcile_task
+            async with asyncio.timeout(2):
+                while not discussion.store.latest_attempt('recover-unknown')['reconcile_count']:
+                    await asyncio.sleep(.01)
             result = discussion.store.job('recover-unknown')
             assert result['state'] == 'outcome_unknown'
             assert 'task not found' in result['error']
             assert discussion.store.latest_attempt('recover-unknown')['state'] == 'outcome_unknown'
+        finally:
+            await discussion.close()
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_keeps_polling_until_remote_completion_without_restart(
+    tmp_path, monkeypatch
+):
+    configure(monkeypatch, {'codex': 'http://127.0.0.1:10002'})
+    monkeypatch.setattr(roundtable, 'RECONCILE_INITIAL_DELAY', .01)
+    monkeypatch.setattr(roundtable, 'RECONCILE_MAX_DELAY', .02)
+    execute_calls = 0
+    lookup_calls = 0
+
+    async def fake_call(url, prompt, room, cwd, on_task_id):
+        nonlocal execute_calls
+        execute_calls += 1
+        await on_task_id('remote-live')
+        raise ConnectionError('stream disconnected')
+
+    async def fake_get(url, task_id):
+        nonlocal lookup_calls
+        lookup_calls += 1
+        state = (
+            TaskState.TASK_STATE_WORKING
+            if lookup_calls == 1
+            else TaskState.TASK_STATE_COMPLETED
+        )
+        return SimpleNamespace(
+            status=SimpleNamespace(state=state, message=None),
+            artifacts=(
+                [SimpleNamespace(parts=[SimpleNamespace(text='eventual result')])]
+                if state == TaskState.TASK_STATE_COMPLETED
+                else []
+            ),
+        )
+
+    monkeypatch.setattr(roundtable, 'call_executor', fake_call)
+    monkeypatch.setattr(roundtable, 'get_remote', fake_get)
+
+    async def scenario():
+        discussion = Discussion(RoomStore(tmp_path / 'rooms.sqlite3'), FakeMember)
+        await discussion.start()
+        try:
+            discussion.submit_execute('lobby', 'Run', 'codex', 'live-reconcile')
+            async with asyncio.timeout(2):
+                while discussion.store.job('live-reconcile')['state'] != 'completed':
+                    await asyncio.sleep(.01)
+            result = discussion.store.job('live-reconcile')
+            assert result['events'][-1]['text'] == 'eventual result'
+            assert execute_calls == 1
+            assert lookup_calls == 2
+            attempt = discussion.store.latest_attempt('live-reconcile')
+            assert attempt['reconcile_count'] == 2
+            assert attempt['last_checked_at'] is not None
         finally:
             await discussion.close()
 

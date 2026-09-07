@@ -30,6 +30,8 @@ from room_store import MEMBERS, RoomStore
 
 LOGGER = logging.getLogger('a2a-roundtable')
 EVENTS_JSON_BYTE_LIMIT = 60000
+RECONCILE_INITIAL_DELAY = 2.0
+RECONCILE_MAX_DELAY = 60.0
 
 
 def bounded_events_json(events, limit=EVENTS_JSON_BYTE_LIMIT):
@@ -306,9 +308,31 @@ class Discussion:
                 raise
             except Exception as exc:
                 error = str(exc).strip() or f'{type(exc).__name__} during execution'
-                await self._finish_execute(
-                    key, attempt_number, 'failed', error, time.monotonic() - started, error
-                )
+                attempt = self.store.latest_attempt(key)
+                if attempt and attempt['remote_task_id']:
+                    reconciliation_error = (
+                        'Executor communication failed after remote task started; '
+                        f'reconciliation required: {error}'
+                    )
+                    changed = self.store.finish_if(
+                        key,
+                        {'running', 'cancel_requested', 'outcome_unknown'},
+                        'outcome_unknown',
+                        reconciliation_error,
+                    )
+                    if changed:
+                        self.store.set_attempt_state(
+                            key, attempt_number, 'outcome_unknown'
+                        )
+                else:
+                    await self._finish_execute(
+                        key,
+                        attempt_number,
+                        'failed',
+                        error,
+                        time.monotonic() - started,
+                        error,
+                    )
                 LOGGER.error('job=%s executor=%s failed (%s)', key, job['executor'], type(exc).__name__)
 
     async def _finish_execute(self, key, attempt_number, state, text, duration, error=None):
@@ -345,45 +369,79 @@ class Discussion:
         )
 
     async def _reconcile_executions(self):
-        for key in self.store.reconcilable_executions():
-            job = self.store.job(key)
-            attempt = self.store.latest_attempt(key)
-            try:
-                remote_task = await get_remote(attempt['endpoint'], attempt['remote_task_id'])
-                remote_state = remote_task.status.state
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                error = str(exc).strip() or type(exc).__name__
-                self.store.set_attempt_state(key, attempt['attempt'], 'outcome_unknown')
-                self.store.finish_if(
-                    key, {'running', 'cancel_requested', 'outcome_unknown'}, 'outcome_unknown',
-                    f'Remote task reconciliation failed: {error}',
-                )
-                continue
+        delay = RECONCILE_INITIAL_DELAY
+        while True:
+            keys = self.store.reconcilable_executions()
+            for key in keys:
+                attempt = self.store.latest_attempt(key)
+                try:
+                    remote_task = await get_remote(
+                        attempt['endpoint'], attempt['remote_task_id']
+                    )
+                    remote_state = remote_task.status.state
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.store.record_reconcile_check(key, attempt['attempt'])
+                    error = str(exc).strip() or type(exc).__name__
+                    changed = self.store.finish_if(
+                        key,
+                        {'running', 'cancel_requested', 'outcome_unknown'},
+                        'outcome_unknown',
+                        f'Remote task reconciliation failed: {error}',
+                    )
+                    if changed:
+                        self.store.set_attempt_state(
+                            key, attempt['attempt'], 'outcome_unknown'
+                        )
+                    continue
 
-            duration = max(0.0, time.time() - attempt['created'])
-            if remote_state == TaskState.TASK_STATE_COMPLETED:
-                await self._finish_execute(
-                    key, attempt['attempt'], 'completed', task_text(remote_task), duration
-                )
-            elif remote_state == TaskState.TASK_STATE_FAILED:
-                text = task_text(remote_task)
-                await self._finish_execute(
-                    key, attempt['attempt'], 'failed', text, duration, text
-                )
-            elif remote_state == TaskState.TASK_STATE_CANCELED:
-                self.store.set_attempt_state(key, attempt['attempt'], 'cancelled')
-                self.store.finish_if(
-                    key, {'running', 'cancel_requested', 'outcome_unknown'}, 'cancelled'
-                )
+                self.store.record_reconcile_check(key, attempt['attempt'])
+                duration = max(0.0, time.time() - attempt['created'])
+                if remote_state == TaskState.TASK_STATE_COMPLETED:
+                    await self._finish_execute(
+                        key,
+                        attempt['attempt'],
+                        'completed',
+                        task_text(remote_task),
+                        duration,
+                    )
+                elif remote_state == TaskState.TASK_STATE_FAILED:
+                    text = task_text(remote_task)
+                    await self._finish_execute(
+                        key, attempt['attempt'], 'failed', text, duration, text
+                    )
+                elif remote_state == TaskState.TASK_STATE_CANCELED:
+                    changed = self.store.finish_if(
+                        key,
+                        {'running', 'cancel_requested', 'outcome_unknown'},
+                        'cancelled',
+                    )
+                    if changed:
+                        self.store.set_attempt_state(
+                            key, attempt['attempt'], 'cancelled'
+                        )
+                else:
+                    state = task_state_name(remote_state)
+                    changed = self.store.finish_if(
+                        key,
+                        {'running', 'cancel_requested', 'outcome_unknown'},
+                        'outcome_unknown',
+                        f'Remote task is {state}; outcome unknown',
+                    )
+                    if changed:
+                        self.store.set_attempt_state(
+                            key, attempt['attempt'], 'outcome_unknown'
+                        )
+
+            if keys:
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, RECONCILE_MAX_DELAY)
             else:
-                state = task_state_name(remote_state)
-                self.store.set_attempt_state(key, attempt['attempt'], 'outcome_unknown')
-                self.store.finish_if(
-                    key, {'running', 'cancel_requested', 'outcome_unknown'}, 'outcome_unknown',
-                    f'Remote task is {state}; outcome unknown',
-                )
+                # 空闲时按上限空转；退避重置为初始值，这样下一个进入未决状态的
+                # 执行能在 2 秒内被首次对账，而不是继承上一轮涨到 60 秒的退避。
+                delay = RECONCILE_INITIAL_DELAY
+                await asyncio.sleep(RECONCILE_MAX_DELAY)
 
     async def _work(self):
         while True:

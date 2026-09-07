@@ -50,7 +50,9 @@ class RoomStore:
                 CREATE TABLE IF NOT EXISTS execution_attempts (
                     job TEXT NOT NULL, attempt INTEGER NOT NULL, endpoint TEXT NOT NULL,
                     remote_task_id TEXT, state TEXT NOT NULL, created REAL NOT NULL,
-                    updated REAL NOT NULL, PRIMARY KEY(job,attempt));
+                    updated REAL NOT NULL, last_checked_at REAL,
+                    reconcile_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(job,attempt));
             """)
             if 'attempts' not in {r['name'] for r in db.execute('PRAGMA table_info(members)')}:
                 db.execute('ALTER TABLE members ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0')
@@ -68,6 +70,16 @@ class RoomStore:
                 db.execute('ALTER TABLE jobs ADD COLUMN cwd TEXT')
             if 'metadata' not in {r['name'] for r in db.execute('PRAGMA table_info(events)')}:
                 db.execute('ALTER TABLE events ADD COLUMN metadata TEXT')
+            attempt_columns = {
+                r['name'] for r in db.execute('PRAGMA table_info(execution_attempts)')
+            }
+            if 'last_checked_at' not in attempt_columns:
+                db.execute('ALTER TABLE execution_attempts ADD COLUMN last_checked_at REAL')
+            if 'reconcile_count' not in attempt_columns:
+                db.execute(
+                    'ALTER TABLE execution_attempts '
+                    'ADD COLUMN reconcile_count INTEGER NOT NULL DEFAULT 0'
+                )
         path.chmod(0o600)
 
     @contextmanager
@@ -228,6 +240,18 @@ class RoomStore:
             result = db.execute(
                 'UPDATE execution_attempts SET state=?,updated=? WHERE job=? AND attempt=?',
                 (state, time.time(), job, attempt),
+            )
+            if not result.rowcount:
+                raise KeyError((job, attempt))
+
+    def record_reconcile_check(self, job, attempt):
+        now = time.time()
+        with self.connect() as db:
+            result = db.execute(
+                'UPDATE execution_attempts '
+                'SET last_checked_at=?,reconcile_count=reconcile_count+1,updated=? '
+                'WHERE job=? AND attempt=?',
+                (now, now, job, attempt),
             )
             if not result.rowcount:
                 raise KeyError((job, attempt))

@@ -125,25 +125,49 @@ systemctl daemon-reload
 systemctl enable a2a-rooms >/dev/null 2>&1 || true
 systemctl restart a2a-rooms
 
-echo "== 验收：四张 Agent Card 版本戳必须等于 $STAMP =="
+# 验收三重：①Agent Card 版本戳 ②systemd 单元 active ③端口监听 PID == 单元 MainPID。
+# 为什么要③：2026-09-07 抓到真事故——cron watchdog 曾在 systemd 之外 setsid 拉起
+# server_pi.py，孤儿进程占着 10000 导致 a2a-pi 单元 failed，而它从同一部署目录起、
+# Agent Card 版本戳完全正确，仅查版本的验收一路全绿。单 owner 必须由 PID 归属证明。
+# （该 watchdog 的 A2A 段已于同日移除，此检查是防回归的护栏。）
+echo "== 验收：版本戳 + systemd 单一 owner（PID 归属）=="
 sleep 3
 ok=1
-for port in 10000 10001 10002 10003; do
+check_owner() {  # $1=unit $2=port
+  local unit=$1 port=$2 active mainpid listener
+  active=$(systemctl is-active "$unit" 2>/dev/null || true)
+  mainpid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)
+  listener=$(ss -ltnp 2>/dev/null | grep ":$port " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  if [ "$active" != active ]; then
+    echo "  $unit FAIL 单元状态=$active"; return 1
+  fi
+  if [ -z "$listener" ]; then
+    echo "  $unit FAIL 端口 $port 无监听"; return 1
+  fi
+  if [ "$listener" != "$mainpid" ]; then
+    echo "  $unit FAIL 端口 $port 监听 PID=$listener 不等于 MainPID=$mainpid（疑似 systemd 之外的孤儿进程占用）"; return 1
+  fi
+  return 0
+}
+for pair in 10000:pi 10001:claude 10002:codex 10003:dsh; do
+  port=${pair%%:*}; name=${pair##*:}
   got=$(curl -s --max-time 5 "http://127.0.0.1:$port/.well-known/agent-card.json" \
         | "$DST/venv/bin/python" -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' \
         2>/dev/null || true)
-  if [ "$got" = "$STAMP" ]; then
-    echo "  port $port OK  version=$got"
-  else
+  if [ "$got" != "$STAMP" ]; then
     echo "  port $port FAIL got='$got' want='$STAMP'"
     ok=0
+  elif ! check_owner "a2a-$name" "$port"; then
+    ok=0
+  else
+    echo "  port $port OK  version=$got  owner=a2a-$name"
   fi
 done
 rooms_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:41241/healthz" || true)
-if [ "$rooms_code" = 200 ]; then
-  echo "  rooms 41241 OK"
+if [ "$rooms_code" = 200 ] && check_owner a2a-rooms 41241; then
+  echo "  rooms 41241 OK  owner=a2a-rooms"
 else
-  echo "  rooms 41241 FAIL http=$rooms_code（查 /var/log/a2a-rooms.log）"
+  [ "$rooms_code" = 200 ] || echo "  rooms 41241 FAIL http=$rooms_code（查 /var/log/a2a-rooms.log）"
   ok=0
 fi
 if [ "$ok" = 1 ]; then

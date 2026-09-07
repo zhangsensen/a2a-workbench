@@ -1,0 +1,14 @@
+[
+  {
+    "agent": "codex",
+    "name": "p0-reconcile",
+    "task": "改 rooms/roundtable.py 与 rooms/room_store.py，两件事。(1) 断线语义：_run_execute 里 call_executor 抛异常时，若该 attempt 已有 remote_task_id，则不得写 failed，必须写 outcome_unknown（error 说明通信异常、需对账）；无 remote_task_id 才是 failed。(2) 持续对账：现在 _reconcile_executions 只在 start() 跑一次，改成后台循环——指数退避（初始 2s，翻倍，上限 60s），每轮处理 store.reconcilable_executions() 里的 job（状态 running/cancel_requested/outcome_unknown 且有 remote_task_id），查远端终态并收敛（completed/failed/cancelled），查不到就保持 outcome_unknown 等下一轮；没有待对账项时也按上限间隔空转；close() 时取消该循环；绝不重发任务。execution_attempts 表加列 last_checked_at REAL 与 reconcile_count INTEGER NOT NULL DEFAULT 0（用现有 if-missing ALTER 模式），每轮查询后更新。测试：rooms/tests 里加用例——远端第一次返回 WORKING、第二次 COMPLETED，服务不重启即最终 completed；有 remote_task_id 时通信异常落 outcome_unknown 且不产生第二次执行。验证：cd rooms 跑 pytest 全过。回复：改动清单 + pytest 末行。",
+    "verify": [{"type": "command", "argv": ["/bin/sh", "-c", "cd rooms && /root/a2a-agents/venv/bin/python -m pytest -q"], "timeout": 300}]
+  },
+  {
+    "agent": "pi",
+    "name": "p0-terminal-whitelist",
+    "task": "改 grid/a2a_call.py 与 grid/test_a2a_call_state.py：把终态判定从『黑名单 FAILED/CANCELED』改成『白名单只有 COMPLETED 算成功』。先读 a2a.types.TaskState 枚举拿到全部取值，然后 finalize_reply 改为：COMPLETED 返回文本；其他任何终态或 None 都抛 AgentTaskFailed，state 字段用可读名（如 REJECTED / INPUT_REQUIRED / AUTH_REQUIRED / WORKING / UNKNOWN）。CLI 层退出码分级：FAILED=1、CANCELED=2、REJECTED=3、INPUT_REQUIRED=4、AUTH_REQUIRED=5、其他非终态或缺失=6（用一个 dict 映射，未知状态回落 6）。test_a2a_call_state.py 为每个枚举取值补一条断言（成功只有 COMPLETED；每个失败态的 state 名与退出码正确）。不要改 call_agent 的网络逻辑。验证：cd grid 跑 unittest discover 全绿。回复：枚举取值清单 + 映射表 + 测试末行。",
+    "verify": [{"type": "command", "argv": ["/bin/sh", "-c", "cd grid && /root/a2a-agents/venv/bin/python -m unittest discover -s . -p 'test_*.py' 2>&1 | tail -1 | grep -q OK"], "timeout": 300}]
+  }
+]
