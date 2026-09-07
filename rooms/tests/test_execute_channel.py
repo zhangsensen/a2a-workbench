@@ -249,6 +249,50 @@ def test_execute_cancel_without_remote_id_requests_cancel(tmp_path, monkeypatch)
     assert result['state'] == 'cancel_requested'
 
 
+def test_cancel_of_queued_execute_settles_immediately(tmp_path, monkeypatch):
+    """还没派发到远端的执行取消必须直接落 cancelled，不能悬挂在 cancel_requested。
+
+    悬挂路径：begin() 只接受 queued，转成 cancel_requested 后协程直接返回不再
+    推进；而没有 remote_task_id 的 job 又不在对账范围内，于是永远没人收敛。
+    """
+    configure(monkeypatch, {'codex': 'http://127.0.0.1:10002'})
+
+    async def scenario():
+        gate = asyncio.Event()
+        calls = []
+
+        async def fake_call(url, prompt, room, cwd, on_task_id):
+            calls.append(prompt)
+            await gate.wait()
+            return TaskState.TASK_STATE_COMPLETED, 'done', .1
+
+        monkeypatch.setattr(roundtable, 'call_executor', fake_call)
+        discussion = Discussion(RoomStore(tmp_path / 'rooms.sqlite3'), FakeMember)
+        await discussion.start()
+        try:
+            # 先占住 codex 的执行位，让第二个任务停留在 queued。
+            discussion.submit_execute('lobby', 'First', 'codex', 'busy')
+            while not calls:
+                await asyncio.sleep(.001)
+            discussion.submit_execute('lobby', 'Second', 'codex', 'queued-one')
+            assert discussion.store.job('queued-one')['state'] == 'queued'
+
+            receipt = await discussion.cancel('queued-one', 'lobby')
+            assert receipt['state'] == 'cancelled', receipt['state']
+            # 不该有第二次远端调用，也不该留下 attempt。
+            assert len(calls) == 1
+            assert discussion.store.latest_attempt('queued-one') is None
+            gate.set()
+            await asyncio.wait_for(discussion.wait('busy'), 2)
+            # 取消状态在被取消的 job 上保持稳定，不被后续调度改写。
+            assert discussion.store.job('queued-one')['state'] == 'cancelled'
+        finally:
+            gate.set()
+            await discussion.close()
+
+    asyncio.run(scenario())
+
+
 def test_cancel_requested_before_remote_id_cancels_when_id_arrives(tmp_path, monkeypatch):
     configure(monkeypatch, {'codex': 'http://127.0.0.1:10002'})
 

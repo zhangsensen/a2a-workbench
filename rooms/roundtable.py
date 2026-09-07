@@ -507,6 +507,15 @@ class Discussion:
         if job['kind'] == 'execute':
             if job['state'] not in {'queued', 'running', 'cancel_requested', 'outcome_unknown'}:
                 return job
+            attempt = self.store.latest_attempt(key)
+            if not (attempt and attempt['remote_task_id']):
+                # 尚未派发到远端：必须直接终止。若也走 request_cancel 会永久悬挂——
+                # begin() 只接受 queued，协程会直接返回不再推进状态；而没有
+                # remote_task_id 的 job 又不在对账范围内，cancel_requested 无人收敛。
+                # 用原子条件更新：仅当此刻仍是 queued 才直接落 cancelled，
+                # 若已被 begin() 抢先转成 running 则落回下面的远端取消流程。
+                if self.store.finish_if(key, {'queued'}, 'cancelled'):
+                    return self.store.job(key)
             self.store.request_cancel(key)
             attempt = self.store.latest_attempt(key)
             if attempt and attempt['remote_task_id']:
