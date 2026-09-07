@@ -599,3 +599,48 @@ def test_mcp_execute_requires_fields_and_forwards(monkeypatch):
         'cwd': '/workspace/project',
     })]
     assert tool['inputSchema']['properties']['cwd']['minLength'] == 1
+
+
+def test_reconcile_does_not_flag_running_remote_as_unknown(tmp_path, monkeypatch):
+    """远端 WORKING 时对账必须保持 running，否则结果会被静默丢弃。
+
+    回归：对账的兜底分支曾把任何非终态（含正常运行中的 WORKING）写成
+    outcome_unknown，而 finish_execute 要求 state='running' 才写结果——
+    于是执行手真实完成的产出再也进不了事件流，job 永久停在 outcome_unknown。
+    """
+    configure(monkeypatch, {'codex': 'http://127.0.0.1:10002'})
+
+    async def scenario():
+        discussion = Discussion(RoomStore(tmp_path / 'rooms.sqlite3'), FakeMember)
+        await discussion.start()
+        try:
+            store = discussion.store
+            store.submit_execute('lobby', 'Run', 'codex', 'orphan')
+            store.begin('orphan')
+            attempt = store.add_attempt('orphan', 'http://127.0.0.1:10002')
+            store.set_attempt_remote('orphan', attempt, 'remote-working')
+
+            states = [TaskState.TASK_STATE_WORKING, TaskState.TASK_STATE_COMPLETED]
+
+            async def fake_get(url, task_id):
+                state = states.pop(0) if states else TaskState.TASK_STATE_COMPLETED
+                return SimpleNamespace(
+                    status=SimpleNamespace(state=state, message=None), artifacts=[]
+                )
+
+            monkeypatch.setattr(roundtable, 'get_remote', fake_get)
+            # 本进程不再持有该 job 的 execute task（模拟重启后的孤儿 attempt）。
+            discussion.execute_tasks.pop('orphan', None)
+
+            # 第一轮：远端 WORKING → 必须仍是 running。
+            await discussion._reconcile_once()
+            assert store.job('orphan')['state'] == 'running', store.job('orphan')['state']
+            # 第二轮：远端 COMPLETED → 收敛并写入结果事件。
+            await discussion._reconcile_once()
+            job = store.job('orphan')
+            assert job['state'] == 'completed', job['state']
+            assert [e for e in job['events'] if e['speaker'].startswith('exec:')]
+        finally:
+            await discussion.close()
+
+    asyncio.run(scenario())
