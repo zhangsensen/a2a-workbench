@@ -35,7 +35,7 @@ from room_agents import Member
 from settings import ROOT, DATA, PORT, BASE_URL, VERSION, EXECUTORS
 from room_store import MEMBERS, RoomStore
 
-LOGGER = logging.getLogger('a2a-roundtable')
+LOGGER = logging.getLogger('patchcrew')
 EVENTS_JSON_BYTE_LIMIT = 60000
 RECONCILE_INITIAL_DELAY = 2.0
 RECONCILE_MAX_DELAY = 60.0

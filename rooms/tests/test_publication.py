@@ -48,7 +48,7 @@ def test_mcp_configuration_is_print_only_and_port_aware(monkeypatch,tmp_path):
     monkeypatch.setenv('A2A_PORT','41243')
     monkeypatch.setattr(service,'ROOT',tmp_path)
     before=list(tmp_path.iterdir())
-    entry=service.mcp_config()['mcpServers']['a2a-roundtable']
+    entry=service.mcp_config()['mcpServers']['patchcrew']
     assert entry['env']=={'A2A_PORT':'41243'}
     assert entry['args']==[str(tmp_path/'roundtable_mcp.py')]
     assert list(tmp_path.iterdir())==before

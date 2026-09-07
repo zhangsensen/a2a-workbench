@@ -32,7 +32,7 @@ def mcp_config():
     entry = {'command': sys.executable, 'args': [str(ROOT / 'roundtable_mcp.py')]}
     if 'A2A_PORT' in os.environ:
         entry['env'] = {'A2A_PORT': os.environ['A2A_PORT']}
-    return {'mcpServers': {'a2a-roundtable': entry}}
+    return {'mcpServers': {'patchcrew': entry}}
 
 
 def launch(*args, check=True):
