@@ -370,14 +370,14 @@ queued → preparing_workspace → dispatching → running
 
 当前代码位置：
 
-- `a2a-workbench`：本机融合实验台，含私有部署假设。
-- `a2a-roundtable`：已有公开 GitHub 历史、MIT、CI 和发布卫生。
+- `patchcrew`：当前唯一源码真源，由原本机融合实验台演进而来。
+- `a2a-roundtable`：原公开仓库历史，已合并进 PatchCrew。
 - `a2a-framework`：早期通用副本，已经分叉。
 
 建议：
 
-1. 以 `a2a-roundtable` 的公开历史作为新 Workbench 的演进基底。
-2. 当前 `a2a-workbench` 用于 dogfood 和融合验证，不直接发布。
+1. 保留 `a2a-roundtable` 的公开发布历史和 `v0.3.0` tag。
+2. 融合开发历史已并入 `patchcrew`；后续 dogfood、发布和部署都从同一仓库进行。
 3. `a2a-framework` 停止独立演进，迁移有价值代码后归档。
 4. 本机 WSL、绝对路径、私有 Agent 和模型配置放入 ignored local overlay。
 5. 最终本机也安装公开包，不维护另一套运行源码。

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# 部署脚本：把 a2a-workbench 的 grid/（执行网格）刷到 WSL 运行环境
+# 部署脚本：把 PatchCrew 的 grid/（执行网格）刷到 WSL 运行环境
 # （/root/a2a-agents，路径沿用旧部署，venv 与 systemd 单元不动），
 # 并让 systemd 单元接管四个 agent。
 #
 # 用法（Windows 侧 PowerShell / Git Bash）：
-#   wsl -u root bash /mnt/d/Dev/a2a/a2a-workbench/deploy-to-wsl.sh
+#   wsl -u root bash /mnt/d/Dev/a2a/patchcrew/deploy-to-wsl.sh
 #
 # 为什么存在：2026-08 服务迁 WSL 后靠手工拷贝同步，修复只落开发副本、
 # 活环境静默停旧版两周（收敛复盘）。此脚本是唯一部署通道：
 # 改代码 → git commit → 跑本脚本 → Agent Card 的 version 字段即部署证据。
 set -euo pipefail
 
-REPO=/mnt/d/Dev/a2a/a2a-workbench
+REPO=/mnt/d/Dev/a2a/patchcrew
 SRC=$REPO/grid
 DST=/root/a2a-agents
 AGENTS=(pi claude codex dsh)
