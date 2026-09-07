@@ -6,12 +6,13 @@ import uvicorn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from executor import ClaudeExecutor
 from starlette.applications import Starlette
 from build_info import version_stamp
+from common.dedup_handler import DedupRequestHandler
+from common.idempotency import RequestDedup
 from common.reconcile import reconcile_stale_tasks
 from task_store import make_store
 
@@ -45,10 +46,11 @@ card = AgentCard(
 
 task_store = make_store("claude")
 
-handler = DefaultRequestHandler(
+handler = DedupRequestHandler(
     agent_executor=ClaudeExecutor(),
     task_store=task_store,
     agent_card=card,
+    request_dedup=RequestDedup("claude"),
 )
 
 routes = []

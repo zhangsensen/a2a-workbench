@@ -180,18 +180,37 @@ def execution_metadata(job, attempt, duration):
         'cwd': job['cwd'],
         'duration': duration,
         'attempt': attempt['attempt'],
+        'eventType': 'execution.result',
+        'executor': job['executor'],
     }
     cwd = job['cwd']
     if cwd and Path(cwd).is_dir():
         commands = {
             'git_log': ['git', '-C', cwd, 'log', '-1', '--oneline'],
             'git_status': ['git', '-C', cwd, 'status', '--short'],
+            'headSha': ['git', '-C', cwd, 'rev-parse', 'HEAD'],
         }
         for field, command in commands.items():
             try:
                 metadata[field] = git(Path(cwd), *command[3:], timeout=5)
             except (OSError, RuntimeError):
                 pass
+
+        changed_files = set()
+        try:
+            diff_output = git(
+                Path(cwd), 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD', timeout=5,
+            )
+            changed_files.update(line for line in diff_output.splitlines() if line)
+        except (OSError, RuntimeError):
+            pass
+        for line in metadata.get('git_status', '').splitlines():
+            path = line[3:].strip() if len(line) > 3 else line.strip()
+            if '->' in path:
+                path = path.rsplit('->', 1)[-1].strip()
+            if path:
+                changed_files.add(path)
+        metadata['changedFiles'] = sorted(changed_files)
     return metadata
 
 

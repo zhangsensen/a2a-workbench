@@ -1,7 +1,7 @@
 """通用 A2A 调用工具：任何 agent/脚本用它调任何注册的 agent。
 
 用法：
-    python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>] [--context <id>] [--fresh-context]
+    python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>] [--context <id>] [--request-id <id>] [--fresh-context]
 
 例：
     python a2a_call.py pi "帮我分析这段代码"
@@ -110,6 +110,7 @@ async def call_agent(
     cwd: str | None = None,
     context: str | None = None,
     fresh_context: bool = False,
+    request_id: str | None = None,
 ) -> str:
     catalog = load_catalog()
     target = next((a for a in catalog["agents"] if a["name"] == name), None)
@@ -139,6 +140,8 @@ async def call_agent(
             meta["context"] = context
         if fresh_context:
             meta["contextReset"] = "1"
+        if request_id:
+            meta["requestId"] = request_id
         request = SendMessageRequest(
             message=new_text_message(text, role=Role.ROLE_USER),
             metadata=meta or None,
@@ -176,6 +179,7 @@ if __name__ == "__main__":
     provider = None
     cwd = None
     context_id = None
+    request_id = None
     if "--model" in args:
         i = args.index("--model")
         if i + 1 < len(args):
@@ -196,8 +200,13 @@ if __name__ == "__main__":
         if i + 1 < len(args):
             context_id = args[i + 1]
             del args[i:i + 2]
+    if "--request-id" in args:
+        i = args.index("--request-id")
+        if i + 1 < len(args):
+            request_id = args[i + 1]
+            del args[i:i + 2]
     if len(args) < 2:
-        raise SystemExit('用法：python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>] [--cwd <目录>] [--context <id>] [--fresh-context]\n      python a2a_call.py --list')
+        raise SystemExit('用法：python a2a_call.py <agent名> "<消息>" [--stream] [--model <id>] [--provider <name>] [--cwd <目录>] [--context <id>] [--request-id <id>] [--fresh-context]\n      python a2a_call.py --list')
     agent_name, message = args[0], args[1]
     try:
         reply = asyncio.run(
@@ -210,6 +219,7 @@ if __name__ == "__main__":
                 cwd=cwd,
                 context=context_id,
                 fresh_context=fresh_context,
+                request_id=request_id,
             )
         )
     except AgentTaskFailed as failure:

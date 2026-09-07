@@ -241,7 +241,9 @@ async def run_dispatch(
         agent_clock_started = time.perf_counter()
         try:
             try:
-                reply = await caller(task["agent"], prompt, cwd=str(tree))
+                reply = await caller(
+                    task["agent"], prompt, cwd=str(tree), request_id=f"{stamp}-{name}"
+                )
             finally:
                 row["agent_finished"] = time.time()
                 row["agent_seconds"] = time.perf_counter() - agent_clock_started

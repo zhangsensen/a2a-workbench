@@ -42,9 +42,14 @@ class TestDispatch(unittest.TestCase):
 
     def test_ok_failed_and_nochange_are_distinguished(self):
         full_failure = "远端失败详情：" + "x" * 900
+        request_ids = {}
 
-        async def fake_caller(agent, prompt, cwd=None, **_kw):
+        async def fake_caller(agent, prompt, cwd=None, request_id=None, **_kw):
             tree = Path(cwd)
+            task_name = next(
+                name for name in ("t-ok", "t-fail", "t-noop") if name in prompt
+            )
+            request_ids[task_name] = request_id
             if "t-fail" in prompt:
                 # agent 失败前已经留下未提交的部分工作（新文件），失败分支
                 # 也不该把它丢掉。
@@ -81,6 +86,12 @@ class TestDispatch(unittest.TestCase):
 
         # 空口声明"完成"但 git 无任何改动 → no-change，不是 ok。
         self.assertEqual(by["t-noop"]["state"], "no-change")
+
+        # 同一 dispatch run 内，每个任务都拿到稳定且互异的幂等键。
+        stamps = {value.rsplit("-", 2)[0] for value in request_ids.values()}
+        self.assertEqual(len(stamps), 1)
+        for name, request_id in request_ids.items():
+            self.assertTrue(request_id.endswith(f"-{name}"))
 
         # 现场默认清理，补丁保留（含失败分支的补丁）。
         self.assertFalse(list(self.out.glob("work-*")))

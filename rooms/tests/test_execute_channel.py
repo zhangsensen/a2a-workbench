@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import threading
@@ -100,6 +101,8 @@ def test_execute_job_lifecycle_and_result_event(tmp_path, monkeypatch):
     assert metadata['cwd'] is None
     assert metadata['duration'] == 1.25
     assert metadata['attempt'] == 1
+    assert metadata['eventType'] == 'execution.result'
+    assert metadata['executor'] == 'codex'
     assert 'delivery' not in metadata
     assert 'evidence' not in metadata
 
@@ -432,6 +435,9 @@ def test_result_event_metadata_includes_git_evidence(tmp_path, monkeypatch):
     (repo / 'tracked.txt').write_text('tracked\n')
     subprocess.run(['git', '-C', str(repo), 'add', 'tracked.txt'], check=True)
     subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'initial'], check=True)
+    (repo / 'committed.txt').write_text('second\n')
+    subprocess.run(['git', '-C', str(repo), 'add', 'committed.txt'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'second commit'], check=True)
     (repo / 'untracked.txt').write_text('new\n')
 
     async def fake_call(url, prompt, room, cwd, on_task_id):
@@ -454,8 +460,12 @@ def test_result_event_metadata_includes_git_evidence(tmp_path, monkeypatch):
     assert metadata['cwd'] == str(repo)
     assert metadata['duration'] == 2.5
     assert metadata['attempt'] == 1
-    assert metadata['git_log'].endswith(' initial')
+    assert metadata['eventType'] == 'execution.result'
+    assert metadata['executor'] == 'codex'
+    assert metadata['git_log'].endswith(' second commit')
     assert metadata['git_status'] == '?? untracked.txt'
+    assert re.fullmatch(r'[0-9a-f]{40}', metadata['headSha'])
+    assert metadata['changedFiles'] == ['committed.txt', 'untracked.txt']
 
 
 def test_restart_reconciliation_completes_remote_execution(tmp_path, monkeypatch):
