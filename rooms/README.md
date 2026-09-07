@@ -1,79 +1,175 @@
-# A2A Roundtable
+# PatchCrew
 
-**One master leads. Persistent peers discuss. Each topic keeps its own context.**
+**Independent agents. One durable crew.**
 
-[中文说明](README.zh-CN.md) · [Master workflow](MASTER.md) · [Operations](OPERATIONS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+Connect Claude Code, Codex, ZCode, and other agent runtimes through persistent, topic-scoped rooms. A coordinating model can consult peers, preserve context across sessions, track disagreements, and hand work forward without turning every participant into its private subagent.
 
-A local Agent2Agent service for a coordinating model to consult Codex, Claude Code, and ZCode over time. You talk to your master model; it selects peers, asks follow-ups, evaluates disagreements, and reports back. Each topic has its own room and each peer keeps a native conversation. You do not need to operate a browser or manage the discussion manually.
+[中文说明](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Design references](REFERENCES.md) · [Master workflow](MASTER.md) · [Operations](OPERATIONS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
-The master is the model in your calling MCP client. The service does not start an additional autonomous master model. It supplies persistent peers and room-scoped recovery notes so that the calling model can lead the conversation.
+> **Current release:** persistent collaboration rooms over MCP, HTTP, and A2A 1.0 are implemented. Isolated worktree execution and machine-verified delivery are the next product layer and are not claimed as part of the current public release.
 
-- **Warm sessions:** provider processes stay alive between turns. After a service restart, the host resumes the saved native session IDs.
-- **Room isolation:** messages, jobs, unread cursors, drafts, and native sessions belong to an explicit room. There is no implicit target room for requests.
-- **Master-led consultations:** select one peer per question, read its actual answer, then decide the next step. The master controls when to stop and how to synthesize the result.
-- **Master recovery:** save a room's goal, summary, open questions, and next action. Recover that checkpoint plus subsequent events without replaying the entire transcript into the master.
-- **Finite roundtables:** choose participants and 1–5 rounds. Participants speak in order and see earlier contributions. They stop when the requested rounds finish.
-- **Several entry points:** browser UI, HTTP, A2A v1.0 JSON-RPC/HTTP+JSON, and a small stdio MCP client.
-- **Local persistence:** SQLite stores room events and job state. Only unseen room events are appended to a participant's existing native conversation.
+## Why PatchCrew
 
-## How it works
+Coding work increasingly spans several independent agent sessions: one investigates, another implements, another reviews, and another tests. Today the human often becomes the router—copying context between terminals, repeating decisions, and reconstructing what happened after sessions end.
+
+PatchCrew provides a durable collaboration layer:
+
+- **Independent agents, not private subagents** — participants keep their own runtime, identity, and native conversation.
+- **Persistent topic context** — each room has its own event stream, unread cursors, member sessions, jobs, and master checkpoint.
+- **Master-led coordination** — the model already talking to the user selects peers, investigates disagreements, and produces the final judgment.
+- **Open interfaces** — browser UI, HTTP, MCP, and standard A2A 1.0 transports share the same room state.
+- **Local-first operation** — SQLite stores collaboration state on the host; model credentials remain with official clients.
+- **Conservative recovery** — uncertain interrupted turns are recorded, not silently replayed.
+
+The project’s north star is simple:
+
+> Reduce the total time and human coordination needed to turn one goal into a verified engineering result.
+
+## Problems it solves
+
+| Problem | Workbench response |
+|---|---|
+| Context is repeatedly copied between independent agent sessions | Room-scoped event streams, unread cursors, and resumable native conversations |
+| A parent agent must own and recreate every helper as a private subagent | Independent peers keep their own identity and runtime; the calling model coordinates them through MCP/A2A |
+| Long discussions lose decisions and unresolved objections | Revision-checked master checkpoints preserve goals, summaries, open questions, and next actions |
+| Retries can trigger duplicate model work | Stable request IDs make exact retries idempotent and reject changed payloads |
+| A restart can silently repeat an uncertain model turn | Running turns become `interrupted`; recorded replies remain inspectable and replay requires a new explicit decision |
+| Multiple topics leak context into one another | Rooms validate event cursors, task ownership, and native-session ownership before provider input and persistence |
+| A receipt or model claim is mistaken for a result | Jobs expose explicit states and recorded replies; the master must read the terminal result before reporting |
+
+PatchCrew does not replace the coding agents, their subscriptions, or their native context systems. It coordinates the clients the user already operates.
+
+## Version status
+
+The public package is currently **v0.3.0**. The project began as **A2A Roundtable**, briefly used **A2A Workbench**, and adopted the distinctive **PatchCrew** name on 2026-09-07. Compatibility identifiers remain unchanged in v0.3.x.
+
+| Version | Milestone |
+|---|---|
+| `v0.1` | Initial local A2A discussion prototype |
+| `v0.2` | Persistent multi-room host, isolated native sessions, HTTP/MCP/A2A surfaces, recovery and room-boundary tests |
+| `v0.3` | Master-led single-peer consultations, revisioned room checkpoints, pagination, exact retry semantics, and improved cancellation/recovery |
+| Next | Isolated worktree execution and machine-verified delivery, after those capabilities are transferred into the public repository and independently validated |
+
+See [CHANGELOG.md](CHANGELOG.md) and the [v0.3.0 release](https://github.com/zhangsensen/patchcrew/releases/tag/v0.3.0) for release details.
+
+## What is implemented today
+
+### Persistent rooms
+
+Every topic has an explicit room. Messages, jobs, unread positions, native sessions, drafts, and master checkpoints are room-scoped. There is no implicit target room.
+
+### Native conversation continuity
+
+Each `(room, member)` owns a separate native conversation. New consultations send only events that member has not seen. After service restart, the host resumes the saved native session ID instead of rebuilding the conversation from a transcript.
+
+### Adaptive master-led consultation
+
+The calling model is the master. It can:
+
+1. recover a room checkpoint and subsequent events;
+2. consult one useful peer with a focused question;
+3. read the actual reply;
+4. challenge a claim with another peer when necessary;
+5. save unresolved questions and the next action;
+6. report its own synthesis to the user.
+
+The server does not start a second autonomous master or force every member to speak.
+
+### Finite roundtables
+
+For bounded discussions, select participants and 1–5 rounds. Members speak in order and see only new room events. The job stops when the requested rounds finish.
+
+### Durable and explicit recovery
+
+- Exact request retries are idempotent.
+- Master checkpoints use revision checks to prevent stale overwrites.
+- Running jobs interrupted by restart become `interrupted`; the host does not blindly replay a potentially billed or completed model turn.
+- Task lookup and cancellation verify room ownership.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    U[User] --> M[Master model in an MCP client]
-    M --> H[Local roundtable host]
+    U[User] --> M[Master in an MCP client]
+    M --> H[PatchCrew host]
+    H --> DB[(SQLite: rooms, events, jobs, cursors, checkpoints)]
     H --> Q[Serial discussion queue]
-    H --> DB[(Room / job / cursor database)]
-    Q --> A[Room A: dedicated Codex, Claude, ZCode sessions]
-    Q --> B[Room B: different Codex, Claude, ZCode sessions]
+    Q --> C[Codex native session per room]
+    Q --> A[Claude native session per room]
+    Q --> Z[ZCode native session per room]
+    H <--> I[Browser / HTTP / MCP / A2A 1.0]
 ```
 
-The host supports up to **8 warm rooms**. Rooms can submit jobs at the same time, but generation runs through one serial queue. Within a room, each participant has a separate process and conversation. These are dedicated roundtable sessions; the service does not attach to unrelated desktop chats.
-
-## Requirements
-
-The full three-participant runtime has been exercised on **macOS with Python 3.13**. Python 3.11+ is supported by the project. LaunchAgent management is macOS-specific; the foreground service uses Unix process groups and is not a Windows runtime.
-
-Install [uv](https://docs.astral.sh/uv/) and the official clients you intend to use, and sign in through those clients:
-
-| Participant | Runtime adapter | Existing login/configuration |
-|---|---|---|
-| Codex | `codex app-server` | Codex account and local configuration; uses its configured default model |
-| Claude Code | `claude -p` with persistent stream JSON input | Claude Code login; tested with a Max subscription and `sonnet` |
-| ZCode | official `zcode app-server` | ZCode Desktop configuration, `builtin:zai-coding-plan`; tested with `GLM-5.3-Flash` |
-
-The adapters depend on installed client protocols. There are no bundled model binaries, account credentials, or model subscriptions. An unavailable participant is shown as an error; available participants can still be explicitly selected for a discussion.
+The current host supports up to eight warm rooms. Different rooms may queue work concurrently, while model generation is serialized. Native model context windows and provider compaction still apply.
 
 ## Quick start
 
+### Requirements
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- At least one supported official coding-agent client, installed and authenticated
+
+| Participant | Runtime adapter | Existing local setup |
+|---|---|---|
+| Codex | `codex app-server` | Codex account and local configuration |
+| Claude Code | `claude -p` with stream JSON | Claude Code login; default model `sonnet` |
+| ZCode | official `zcode app-server` | ZCode Desktop provider configuration |
+
 ```bash
-git clone https://github.com/zhangsensen/a2a-roundtable.git
-cd a2a-roundtable
+git clone https://github.com/zhangsensen/patchcrew.git
+cd patchcrew/rooms
 uv sync --locked --group dev
 uv run python roundtable.py
 ```
 
-In a second terminal, run `uv run python service.py mcp-config` and add the printed entry to your master's MCP client using its supported setup flow. Reconnect MCP, then ask your master to consult the relevant peers. See the [master workflow](MASTER.md). The browser at **http://127.0.0.1:41241/** is optional.
+The optional browser UI is available at:
 
-For a persistent macOS service, first stop the foreground process with Ctrl-C, then run:
-
-```bash
-uv run python service.py install
-uv run python service.py status
+```text
+http://127.0.0.1:41241/
 ```
 
-The installer creates only its own `io.github.a2a-roundtable` LaunchAgent. It does not rewrite model client configurations or disable other services. Keep the checkout and its `.venv` at the same path after installation.
-
-If the port is already occupied, choose a different one consistently for the server and its clients:
+In another terminal, print the MCP configuration:
 
 ```bash
-A2A_PORT=41243 uv run python roundtable.py
-A2A_PORT=41243 uv run python ask.py --context-id lobby 'Continue our discussion'
+uv run python service.py mcp-config
 ```
 
-## Use the rooms explicitly
+Add the generated entry to your master client, reconnect MCP, and ask it to create or reuse a room and consult the relevant peers. See [MASTER.md](MASTER.md) for the complete workflow.
 
-Create an independent topic:
+## MCP workflow
+
+Typical adaptive flow:
+
+```text
+roundtable_rooms / roundtable_create_room
+→ roundtable_context
+→ roundtable_consult
+→ roundtable_job
+→ optional follow-up consultations
+→ roundtable_checkpoint
+→ master reports to the user
+```
+
+Core tools:
+
+| Tool | Purpose |
+|---|---|
+| `roundtable_rooms` | List persistent rooms |
+| `roundtable_create_room` | Create a topic-scoped room |
+| `roundtable_context` | Recover the master checkpoint and subsequent events |
+| `roundtable_consult` | Ask one selected persistent peer once |
+| `roundtable_job` | Read a job receipt and actual replies |
+| `roundtable_checkpoint` | Save goal, summary, unresolved questions, and next action |
+| `roundtable_post` | Run a fixed 1–5 round discussion |
+| `roundtable_history` | Read room events without consuming them |
+| `roundtable_cancel` | Cancel a scoped queued/running job |
+
+A receipt is not an answer. Read the job until it reaches a terminal state; do not resubmit a consultation merely to poll.
+
+## HTTP example
+
+Create a room:
 
 ```bash
 curl -sS http://127.0.0.1:41241/api/rooms \
@@ -81,69 +177,54 @@ curl -sS http://127.0.0.1:41241/api/rooms \
   -d '{"id":"architecture","title":"Architecture discussion"}'
 ```
 
-Post to that room and schedule two rounds:
+Ask two peers for one bounded round:
 
 ```bash
 curl -sS http://127.0.0.1:41241/api/rooms/architecture/messages \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Compare the two designs from our last discussion.","members":["codex","claude","zcode"],"rounds":2,"requestId":"architecture-review-001"}'
+  -d '{"text":"Review the migration plan.","members":["codex","claude"],"rounds":1,"requestId":"architecture-review-001"}'
 ```
 
-The response is a job receipt, not the completed discussion. Read it using **both** its job ID and room:
+Read the result with both job and room identity:
 
 ```bash
 curl -sS 'http://127.0.0.1:41241/api/jobs/JOB_ID?room=architecture'
 ```
 
-Or use the A2A CLI, which waits for a terminal task:
-
-```bash
-uv run python ask.py --context-id architecture 'What remains unresolved?'
-```
-
-Reuse a room ID to continue the same topic. Create another room for an unrelated topic. Reuse the same `requestId` when retrying an uncertain HTTP/MCP submission with identical content.
-
-## MCP
-
-Print a configuration fragment with the correct absolute interpreter and script paths:
-
-```bash
-uv run python service.py mcp-config
-```
-
-Add the resulting entry to your client's MCP configuration using its supported setup flow, then reconnect MCP. For clients using TOML, the equivalent structure is:
-
-```toml
-[mcp_servers.a2a-roundtable]
-command = "/absolute/path/to/a2a-roundtable/.venv/bin/python"
-args = ["/absolute/path/to/a2a-roundtable/roundtable_mcp.py"]
-```
-
-Master workflow: `roundtable_rooms` / `roundtable_create_room` → `roundtable_context` → `roundtable_consult` → `roundtable_job` → follow-up consultations as needed → `roundtable_checkpoint` → report to the user.
-
-`roundtable_consult` asks exactly one peer once. Supply a stable `requestId` and use `roundtable_job` with optional `waitSeconds` (0–25) to read its result. Waiting does not invoke models or resubmit a request. `roundtable_context` returns a checkpoint and subsequent events with explicit pagination. Checkpoint revisions reject stale overwrites; exact retries are idempotent.
-
-The existing `roundtable_status`, `roundtable_post`, `roundtable_history`, and `roundtable_cancel` tools remain available. `roundtable_post` is the optional fixed-round mode; adaptive master-led discussion uses `roundtable_consult`.
-
-All consultation, context, checkpoint, post, history, job, and cancel operations require an explicit `room`. The MCP process is just a client; reconnecting it does not restart model conversations.
+Reuse the same `requestId` only for an exact uncertain retry.
 
 ## Configuration
 
-Set environment variables before launching the service. `.env.example` documents the supported variables, but files are **not automatically loaded**.
+Export settings before starting the service. `.env.example` documents them; `.env` files are not loaded automatically.
 
-| Variable | Default / purpose |
+| Variable | Purpose |
 |---|---|
-| `A2A_PORT` | `41241`; loopback port, also used by CLI/MCP clients |
-| `A2A_ROOM_DATA` | `data/roundtable` under the checkout |
-| `A2A_CODEX_BIN`, `A2A_CLAUDE_BIN`, `A2A_ZCODE_BIN` | Optional executable paths; otherwise resolve from PATH and common user installation directories |
-| `A2A_CLAUDE_MODEL` | `sonnet` |
-| `A2A_ZCODE_MODEL` | `GLM-5.3-Flash` |
-| `A2A_ZCODE_CONFIG` | `~/.zcode/v2/config.json`; existing Desktop provider configuration |
-| `CODEX_HOME` | Existing Codex home override, if you already use one |
+| `A2A_PORT` | Loopback service port; default `41241` |
+| `A2A_ROOM_DATA` | Persistent room data directory |
+| `A2A_CODEX_BIN` | Optional Codex executable override |
+| `A2A_CLAUDE_BIN` | Optional Claude executable override |
+| `A2A_ZCODE_BIN` | Optional ZCode executable override |
+| `A2A_CLAUDE_MODEL` | Claude model alias; default `sonnet` |
+| `A2A_ZCODE_MODEL` | ZCode model; default `GLM-5.3-Flash` |
+| `A2A_ZCODE_CONFIG` | Existing ZCode Desktop configuration |
+| `CODEX_HOME` | Existing Codex home override |
 
-ZCode provider credentials are read from the user's existing local Desktop configuration and sent only to its official app-server over private stdin. They are not copied into this repository or stored in room records, command arguments, or logs. See [security boundaries](SECURITY.md).
+Credentials stay in official client configuration. PatchCrew does not bundle model binaries, API keys, or subscriptions.
 
-## Validation and limits
+## Safety boundary
+
+PatchCrew is a single-user local development tool.
+
+- It binds to loopback by default.
+- Room IDs are routing boundaries, not secrets.
+- Peer messages cannot authorize file changes, shell execution, deployment, external messaging, or more background work.
+- Claude runs without tools; Codex uses a read-only sandbox; ZCode uses plan mode with a restricted tool allowlist.
+- These controls are not an OS sandbox. Run only clients you trust.
+- Never expose the service through a public proxy without adding an appropriate authentication and isolation layer.
+
+See [SECURITY.md](SECURITY.md) for the full data and process boundary.
+
+## Validation
 
 ```bash
 uv run pytest -q
@@ -151,19 +232,43 @@ node --check roundtable_ui.js
 python3 scripts/check_publication.py --worktree
 ```
 
-Offline tests use fake members and require no model credentials. Optional real-model probes consume provider usage:
+Offline tests use fake members and require no model subscription. Optional real-provider probes consume usage:
 
 ```bash
 uv run python native_acceptance.py
 uv run python native_room_acceptance.py
 ```
 
-The two-room probe creates six native sessions, gives the rooms different synthetic facts, checks continuous recall, closes all processes, then resumes the saved IDs and checks recall without injecting the original facts. Its local reports are ignored by Git.
+## Design references
 
-Warm processes do not provide unlimited context, permanent provider prompt-cache retention, or free inference. Native context windows and compaction still apply. Interrupted turns are not silently replayed because the provider may already have processed them.
+The design was informed by several open-source projects, while the implementation in this repository was written independently:
 
-The service listens on loopback and has no multi-user authentication. Room isolation prevents accidental topic mixing; it is not an access-control boundary between untrusted local users. Never expose it through a public proxy. The discussion policy and client permission settings restrict actions, but the adapters are not an OS-level sandbox.
+- [A2A Protocol](https://github.com/a2aproject/A2A) — standard Agent Card discovery, task lifecycle, messages, artifacts, and transports.
+- [Claw Orchestrator](https://github.com/Enderfga/claw-orchestrator) — persistent programmable CLI sessions and multi-engine orchestration.
+- [Agent Room](https://github.com/agent-room-alkl/agent-room) — shared rooms, explicit collaboration turns, and durable project context.
+- [Peertable](https://github.com/kitepon/peertable) — long-lived peers and retained room history.
+
+PatchCrew deliberately differs by keeping the user-facing model as the master, preserving one native conversation per room/member, and treating peer messages as discussion rather than execution authority. See [REFERENCES.md](REFERENCES.md) for the detailed adopted/rejected design choices and license notes.
+
+## Product direction
+
+The current release establishes the collaboration and context layer. The next layer is a verified delivery loop:
+
+```text
+one user goal
+→ one master
+→ independent agents in isolated worktrees
+→ machine-checked delivery
+→ master integration
+→ results return to the same persistent context
+```
+
+Planned work includes configurable agent adapters, isolated workspace execution, structured delivery evidence, and a unified workflow connecting persistent rooms to verified code changes. These are roadmap items until they are shipped in the public repository.
+
+## Compatibility note
+
+The Python distribution and macOS LaunchAgent label retain `a2a-roundtable` in v0.3.x for compatibility. New MCP configuration and user-facing service metadata use **PatchCrew**. The remaining compatibility identifiers will change only through an explicit migration.
 
 ## License
 
-[MIT](LICENSE) for this project's code. Third-party SDKs and model clients retain their own licenses and account terms; they are not redistributed here.
+[MIT](LICENSE). Third-party SDKs and model clients retain their own licenses and account terms.

@@ -17,4 +17,6 @@ Do not add automatic client-configuration migration, background infinite model l
 
 Protocol adapter changes should state which installed client version was tested. A successful fake-model test does not prove that a real client version accepts the same messages. Keep the dependency lock file current when changing dependencies.
 
+When a change is based on another project, document the upstream repository, commit, license, and whether code was copied or the idea was independently reimplemented. Keep [REFERENCES.md](REFERENCES.md) current.
+
 Contributions to this project are made under its MIT license.
