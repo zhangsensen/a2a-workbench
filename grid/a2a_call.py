@@ -38,32 +38,59 @@ from a2a.types import Role, SendMessageRequest, TaskState
 BASE = Path(__file__).resolve().parent
 CATALOG = BASE / "agents.json"
 
-# 服务端的 FAILED/CANCELED 必须传播到调用方：master 的自动编排全靠区分成败。
-_TERMINAL_BAD = {
-    TaskState.TASK_STATE_FAILED: "FAILED",
-    TaskState.TASK_STATE_CANCELED: "CANCELED",
+# 成功白名单：只有 COMPLETED 算成功。之前用的是"FAILED/CANCELED 才算失败"的
+# 黑名单，任何新增或未预料的状态（REJECTED、INPUT_REQUIRED、AUTH_REQUIRED，以及
+# 协议不完整导致的 WORKING/None）都会被当成成功返回——编排方据此继续推进就是
+# 在错误的前提上工作。白名单让未知状态默认失败。
+_SUCCESS = TaskState.TASK_STATE_COMPLETED
+
+# 状态 → (可读名, CLI 退出码)。退出码分级让 shell/CI 能区分处置方式：
+# 1 执行失败可查日志；2 被取消；3 被拒绝；4/5 需要人介入补输入或授权；
+# 6 协议不完整（拿不到终态），属于基础设施问题而非任务结果。
+_STATE_EXIT = {
+    TaskState.TASK_STATE_FAILED: ("FAILED", 1),
+    TaskState.TASK_STATE_CANCELED: ("CANCELED", 2),
+    TaskState.TASK_STATE_REJECTED: ("REJECTED", 3),
+    TaskState.TASK_STATE_INPUT_REQUIRED: ("INPUT_REQUIRED", 4),
+    TaskState.TASK_STATE_AUTH_REQUIRED: ("AUTH_REQUIRED", 5),
 }
+_UNSETTLED_EXIT = 6  # WORKING/SUBMITTED/UNSPECIFIED/None：没有终态可依据
+
+
+def state_name_and_exit(state: object) -> tuple[str, int]:
+    """把任意终态映射成 (可读名, 退出码)；未知或非终态一律 6。"""
+    if state in _STATE_EXIT:
+        return _STATE_EXIT[state]
+    if state is None:
+        return "NO_TERMINAL_STATE", _UNSETTLED_EXIT
+    try:
+        name = TaskState.Name(state)
+    except (TypeError, ValueError):
+        name = str(state)
+    return name, _UNSETTLED_EXIT
 
 
 class AgentTaskFailed(RuntimeError):
-    """远端任务落在失败终态；text 为可读原因（来自任务 artifact/status）。"""
+    """远端任务未落在 COMPLETED；text 为可读原因（来自任务 artifact/status）。"""
 
-    def __init__(self, state: str, text: str) -> None:
+    def __init__(self, state: str, text: str, exit_code: int = 1) -> None:
         super().__init__(f"[{state}] {text}")
         self.state = state
         self.text = text
+        self.exit_code = exit_code
 
 
 def finalize_reply(final_state: object, parts: list[str]) -> str:
-    """把(终态, 文本片段)收敛为结果：失败终态抛异常，其余返回文本。
+    """把(终态, 文本片段)收敛为结果：只有 COMPLETED 返回文本，其余一律抛异常。
 
     旧实现只拼 artifact 文本、丢弃任务终态——服务端诚实的 FAILED 在客户端
     变成 exit 0 的"正常输出"，master 会把错误文本当成功结果继续用。
     """
     text = "\n".join(parts) if parts else "(无文本回复)"
-    if final_state in _TERMINAL_BAD:
-        raise AgentTaskFailed(_TERMINAL_BAD[final_state], text)
-    return text
+    if final_state == _SUCCESS:
+        return text
+    name, exit_code = state_name_and_exit(final_state)
+    raise AgentTaskFailed(name, text, exit_code)
 
 
 def load_catalog() -> dict:
@@ -179,9 +206,9 @@ if __name__ == "__main__":
             )
         )
     except AgentTaskFailed as failure:
-        # 失败原因照常打印（调用方要看），但退出码必须非零——
-        # 让 shell 编排、CI 和 master 都能用 $? 分辨成败。
+        # 失败原因照常打印（调用方要看），但退出码必须非零且分级——
+        # 让 shell 编排、CI 和 master 既能用 $? 分辨成败，也能区分处置方式。
         print(failure.text)
-        print(f"task state: {failure.state}", file=sys.stderr)
-        raise SystemExit(1) from None
+        print(f"task state: {failure.state} (exit {failure.exit_code})", file=sys.stderr)
+        raise SystemExit(failure.exit_code) from None
     print(reply)
