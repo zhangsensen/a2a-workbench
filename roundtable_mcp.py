@@ -84,7 +84,7 @@ def main():
             if 'id' not in request: continue
             method = request.get('method')
             if method == 'initialize':
-                result = {'protocolVersion': request.get('params',{}).get('protocolVersion','2024-11-05'), 'capabilities': {'tools': {}}, 'serverInfo': {'name':'a2a-roundtable','version':'0.3.0'}, 'instructions': MASTER_INSTRUCTIONS}
+                result = {'protocolVersion': request.get('params',{}).get('protocolVersion','2024-11-05'), 'capabilities': {'tools': {}}, 'serverInfo': {'name':'a2a-workbench','version':'0.3.0'}, 'instructions': MASTER_INSTRUCTIONS}
             elif method == 'tools/list': result = {'tools': TOOLS}
             elif method == 'ping': result = {}
             elif method == 'tools/call':

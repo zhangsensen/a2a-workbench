@@ -263,7 +263,7 @@ Workbench 的明确取舍是：当前与用户对话的模型担任 Master；每
 
 ## 兼容性说明
 
-内部 Python 包和 MCP Server 暂时保留 `a2a-roundtable` 标识，避免现有安装立即失效；GitHub 仓库与产品名称已经升级为 **A2A Workbench**。兼容标识只会通过明确迁移修改。
+Python distribution 与 macOS LaunchAgent 在 v0.3.x 暂时保留 `a2a-roundtable` 标识，避免现有安装立即失效；新的 MCP 配置和用户可见服务元数据使用 **A2A Workbench**。其余兼容标识只会通过明确迁移修改。
 
 ## 许可证
 

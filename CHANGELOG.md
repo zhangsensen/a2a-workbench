@@ -15,7 +15,7 @@ A2A Workbench follows semantic versioning for public releases. The project was o
 - Renamed the product and repository to **A2A Workbench**.
 - Reframed the documentation around open collaboration between independent coding agents.
 - Documented the product problem, design references, current delivery boundary, and next verified-delivery layer.
-- Retained the `a2a-roundtable` Python package, MCP key, and macOS LaunchAgent label for v0.3.x compatibility.
+- Retained the `a2a-roundtable` Python distribution and macOS LaunchAgent label for v0.3.x compatibility; new MCP configurations and user-facing service metadata use `a2a-workbench` / A2A Workbench.
 
 ## 0.3.0 — 2026-09-05
 

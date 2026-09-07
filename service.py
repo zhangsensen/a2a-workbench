@@ -10,6 +10,7 @@ import urllib.request
 
 from settings import ROOT, BASE_URL
 
+# Keep the legacy LaunchAgent label in v0.3.x so existing installations upgrade in place.
 LABEL = 'io.github.a2a-roundtable'
 PLIST = Path.home() / 'Library/LaunchAgents' / (LABEL + '.plist')
 PUBLIC_SETTINGS = ('A2A_PORT', 'A2A_ROOM_DATA', 'A2A_CODEX_BIN', 'A2A_CLAUDE_BIN',
@@ -32,7 +33,7 @@ def mcp_config():
     entry = {'command': sys.executable, 'args': [str(ROOT / 'roundtable_mcp.py')]}
     if 'A2A_PORT' in os.environ:
         entry['env'] = {'A2A_PORT': os.environ['A2A_PORT']}
-    return {'mcpServers': {'a2a-roundtable': entry}}
+    return {'mcpServers': {'a2a-workbench': entry}}
 
 
 def launch(*args, check=True):

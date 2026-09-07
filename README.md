@@ -267,7 +267,7 @@ Planned work includes configurable agent adapters, isolated workspace execution,
 
 ## Compatibility note
 
-The internal Python package and MCP server currently retain the `a2a-roundtable` identifier for configuration compatibility. The GitHub project and product name are now **A2A Workbench**. Compatibility identifiers will change only through an explicit migration.
+The Python distribution and macOS LaunchAgent label retain `a2a-roundtable` in v0.3.x for compatibility. New MCP configuration and user-facing service metadata use **A2A Workbench**. The remaining compatibility identifiers will change only through an explicit migration.
 
 ## License
 
