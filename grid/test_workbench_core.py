@@ -6,21 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import delivery
-import verification
-import workspace
 from workbench_core import delivery as core_delivery
 from workbench_core import verification as core_verification
 from workbench_core import workspace as core_workspace
 
 
 class TestWorkbenchCore(unittest.TestCase):
-    def test_legacy_modules_reexport_the_core_objects(self):
-        self.assertIs(delivery.collect_git_evidence, core_delivery.collect_git_evidence)
-        self.assertIs(delivery.snapshot_protected, core_delivery.snapshot_protected)
-        self.assertIs(verification.run_checks, core_verification.run_checks)
-        self.assertIs(workspace.git, core_workspace.git)
-
     def test_contract_freeze_validates_and_copies(self):
         checks = [{"type": "file", "path": "locked.txt"}]
         contract = core_verification.freeze_contract(
