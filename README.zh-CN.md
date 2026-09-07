@@ -1,16 +1,16 @@
-# A2A Workbench · 开放式 Coding Agent 协作工作台
+# PatchCrew · Coding Agent 持久协作团队
 
-**让彼此独立的 Coding Agent 持续协作，而不是被锁在某个主 Agent 的私有 subagent 树里。**
+**独立 Agent，一个持续协作的团队。**
 
 [English](README.md) · [版本记录](CHANGELOG.md) · [设计参照](REFERENCES.md) · [Master 主持流程](MASTER.md) · [运行说明](OPERATIONS.md) · [安全边界](SECURITY.md) · [参与贡献](CONTRIBUTING.md)
 
 > **当前公开版本：** 已实现基于 MCP、HTTP 和标准 A2A 1.0 的持久协作房间。隔离 worktree 执行和机器验证交付是下一层产品能力，尚未作为当前公开版本的已交付功能宣传。
 
-## 为什么做 A2A Workbench
+## 为什么做 PatchCrew
 
 真实软件开发正在同时使用多个 Agent：一个调查、一个实现、一个测试、一个审查。今天通常由人充当路由器，在多个终端之间复制背景、转述决定、追问进度，并在会话结束后重新拼接发生了什么。
 
-A2A Workbench 提供一层持久协作基础：
+PatchCrew 提供一层持久协作基础：
 
 - **独立 Agent，不是私有子代理**：参与者保留自己的运行时、身份和原生会话。
 - **议题级持久上下文**：每个房间独立保存事件、未读游标、成员会话、任务和主持检查点。
@@ -35,11 +35,11 @@ A2A Workbench 提供一层持久协作基础：
 | 多个议题之间发生上下文串线 | 在模型输入和结果落盘前校验房间、游标、任务和原生会话归属 |
 | 把回执或模型自述误当成结果 | Job 暴露明确状态和实际回复；Master 必须读取终态后才能汇报 |
 
-A2A Workbench 不替代 Coding Agent、模型订阅或它们自己的上下文系统，而是协调用户已经在使用的客户端。
+PatchCrew 不替代 Coding Agent、模型订阅或它们自己的上下文系统，而是协调用户已经在使用的客户端。
 
 ## 版本状态
 
-当前公开包版本为 **v0.3.0**。仓库于 2026-09-07 从 **A2A Roundtable** 改名为 **A2A Workbench**；v0.3.x 暂时保留旧内部标识以兼容已有安装。
+当前公开包版本为 **v0.3.0**。项目最初名为 **A2A Roundtable**，曾短暂使用 **A2A Workbench**，并于 2026-09-07 正式采用更独特的品牌名 **PatchCrew**；v0.3.x 暂时保留旧内部标识以兼容已有安装。
 
 | 版本 | 里程碑 |
 |---|---|
@@ -89,7 +89,7 @@ A2A Workbench 不替代 Coding Agent、模型订阅或它们自己的上下文�
 ```mermaid
 flowchart LR
     U[用户] --> M[MCP 客户端中的 Master]
-    M --> H[A2A Workbench Host]
+    M --> H[PatchCrew Host]
     H --> DB[(SQLite：房间 / 事件 / 任务 / 游标 / 检查点)]
     H --> Q[串行讨论队列]
     Q --> C[每房间独立 Codex 会话]
@@ -115,8 +115,8 @@ flowchart LR
 | ZCode | 官方 `zcode app-server` | ZCode Desktop provider 配置 |
 
 ```bash
-git clone https://github.com/zhangsensen/a2a-workbench.git
-cd a2a-workbench
+git clone https://github.com/zhangsensen/patchcrew.git
+cd patchcrew
 uv sync --locked --group dev
 uv run python roundtable.py
 ```
@@ -209,7 +209,7 @@ Workbench 不捆绑模型二进制、API Key 或订阅；凭据留在官方客�
 
 ## 安全边界
 
-A2A Workbench 当前是单用户本地开发工具：
+PatchCrew 当前是单用户本地开发工具：
 
 - 默认只监听回环地址；
 -房间 ID 是路由边界，不是密钥；
@@ -263,7 +263,7 @@ Workbench 的明确取舍是：当前与用户对话的模型担任 Master；每
 
 ## 兼容性说明
 
-Python distribution 与 macOS LaunchAgent 在 v0.3.x 暂时保留 `a2a-roundtable` 标识，避免现有安装立即失效；新的 MCP 配置和用户可见服务元数据使用 **A2A Workbench**。其余兼容标识只会通过明确迁移修改。
+Python distribution 与 macOS LaunchAgent 在 v0.3.x 暂时保留 `a2a-roundtable` 标识，避免现有安装立即失效；新的 MCP 配置和用户可见服务元数据使用 **PatchCrew**。其余兼容标识只会通过明确迁移修改。
 
 ## 许可证
 

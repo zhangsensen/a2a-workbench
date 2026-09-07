@@ -1,6 +1,6 @@
 # Changelog
 
-A2A Workbench follows semantic versioning for public releases. The project was originally published as **A2A Roundtable**; the GitHub repository was renamed to **A2A Workbench** on 2026-09-07.
+PatchCrew follows semantic versioning for public releases. The project was originally published as **A2A Roundtable**, briefly used **A2A Workbench**, and adopted **PatchCrew** on 2026-09-07.
 
 ## Versioning policy
 
@@ -12,10 +12,10 @@ A2A Workbench follows semantic versioning for public releases. The project was o
 
 ## Unreleased
 
-- Renamed the product and repository to **A2A Workbench**.
+- Renamed the product and repository to **PatchCrew**.
 - Reframed the documentation around open collaboration between independent coding agents.
 - Documented the product problem, design references, current delivery boundary, and next verified-delivery layer.
-- Retained the `a2a-roundtable` Python distribution and macOS LaunchAgent label for v0.3.x compatibility; new MCP configurations and user-facing service metadata use `a2a-workbench` / A2A Workbench.
+- Retained the `a2a-roundtable` Python distribution and macOS LaunchAgent label for v0.3.x compatibility; new MCP configurations and user-facing service metadata use `patchcrew` / PatchCrew.
 
 ## 0.3.0 — 2026-09-05
 

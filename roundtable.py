@@ -21,7 +21,7 @@ from room_agents import Member
 from settings import ROOT, DATA, PORT, BASE_URL
 from room_store import MEMBERS, RoomStore
 
-LOGGER = logging.getLogger('a2a-workbench')
+LOGGER = logging.getLogger('patchcrew')
 
 
 class Discussion:
@@ -200,7 +200,7 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
             await app.state.a2a_handler.aclose()
             await app.state.a2a_engine.dispose()
 
-    app = FastAPI(title='A2A Workbench', lifespan=lifespan)
+    app = FastAPI(title='PatchCrew', lifespan=lifespan)
     app.state.discussion = discussion
 
     @app.middleware('http')
@@ -400,7 +400,7 @@ def add_standard_a2a(app, discussion, data):
             else:
                 await updater.failed(message=updater.new_agent_message(parts=[Part(text=result['error'] or result['state'])]))
 
-    card = AgentCard(name='A2A Workbench', description='独立 Coding Agent 的持久协作工作台。必须显式指定已有房间 contextId；任务读取、取消和订阅要求 X-A2A-Room 请求头。',
+    card = AgentCard(name='PatchCrew', description='独立 Coding Agent 的持久协作与验证交付团队。必须显式指定已有房间 contextId；任务读取、取消和订阅要求 X-A2A-Room 请求头。',
         version='0.3.0', capabilities=AgentCapabilities(streaming=False, push_notifications=False),
         default_input_modes=['text'], default_output_modes=['text'],
         skills=[AgentSkill(id='roundtable', name='持续圆桌讨论', description='共享新增发言，各成员保留原生会话。metadata.members 指定成员，metadata.rounds 指定轮数。', tags=['roundtable','persistent','discussion'])],

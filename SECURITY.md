@@ -1,6 +1,6 @@
 # Security and data boundaries
 
-A2A Workbench is a single-user local development tool. It binds to `127.0.0.1`, rejects unexpected Host headers and cross-origin requests, and has no multi-user authentication. **Do not expose it through a public proxy, shared network tunnel, or untrusted local application.** The room IDs are routing boundaries, not secrets or authorization credentials.
+PatchCrew is a single-user local development tool. It binds to `127.0.0.1`, rejects unexpected Host headers and cross-origin requests, and has no multi-user authentication. **Do not expose it through a public proxy, shared network tunnel, or untrusted local application.** The room IDs are routing boundaries, not secrets or authorization credentials.
 
 ## Local data and provider traffic
 

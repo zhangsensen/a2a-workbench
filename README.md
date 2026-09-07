@@ -1,6 +1,6 @@
-# A2A Workbench
+# PatchCrew
 
-**Open collaboration for independent coding agents.**
+**Independent agents. One durable crew.**
 
 Connect Claude Code, Codex, ZCode, and other agent runtimes through persistent, topic-scoped rooms. A coordinating model can consult peers, preserve context across sessions, track disagreements, and hand work forward without turning every participant into its private subagent.
 
@@ -8,11 +8,11 @@ Connect Claude Code, Codex, ZCode, and other agent runtimes through persistent, 
 
 > **Current release:** persistent collaboration rooms over MCP, HTTP, and A2A 1.0 are implemented. Isolated worktree execution and machine-verified delivery are the next product layer and are not claimed as part of the current public release.
 
-## Why A2A Workbench
+## Why PatchCrew
 
 Coding work increasingly spans several independent agent sessions: one investigates, another implements, another reviews, and another tests. Today the human often becomes the router—copying context between terminals, repeating decisions, and reconstructing what happened after sessions end.
 
-A2A Workbench provides a durable collaboration layer:
+PatchCrew provides a durable collaboration layer:
 
 - **Independent agents, not private subagents** — participants keep their own runtime, identity, and native conversation.
 - **Persistent topic context** — each room has its own event stream, unread cursors, member sessions, jobs, and master checkpoint.
@@ -37,11 +37,11 @@ The project’s north star is simple:
 | Multiple topics leak context into one another | Rooms validate event cursors, task ownership, and native-session ownership before provider input and persistence |
 | A receipt or model claim is mistaken for a result | Jobs expose explicit states and recorded replies; the master must read the terminal result before reporting |
 
-A2A Workbench does not replace the coding agents, their subscriptions, or their native context systems. It coordinates the clients the user already operates.
+PatchCrew does not replace the coding agents, their subscriptions, or their native context systems. It coordinates the clients the user already operates.
 
 ## Version status
 
-The public package is currently **v0.3.0**. The repository was renamed from **A2A Roundtable** to **A2A Workbench** on 2026-09-07; compatibility identifiers remain unchanged in v0.3.x.
+The public package is currently **v0.3.0**. The project began as **A2A Roundtable**, briefly used **A2A Workbench**, and adopted the distinctive **PatchCrew** name on 2026-09-07. Compatibility identifiers remain unchanged in v0.3.x.
 
 | Version | Milestone |
 |---|---|
@@ -91,7 +91,7 @@ For bounded discussions, select participants and 1–5 rounds. Members speak in 
 ```mermaid
 flowchart LR
     U[User] --> M[Master in an MCP client]
-    M --> H[A2A Workbench host]
+    M --> H[PatchCrew host]
     H --> DB[(SQLite: rooms, events, jobs, cursors, checkpoints)]
     H --> Q[Serial discussion queue]
     Q --> C[Codex native session per room]
@@ -117,8 +117,8 @@ The current host supports up to eight warm rooms. Different rooms may queue work
 | ZCode | official `zcode app-server` | ZCode Desktop provider configuration |
 
 ```bash
-git clone https://github.com/zhangsensen/a2a-workbench.git
-cd a2a-workbench
+git clone https://github.com/zhangsensen/patchcrew.git
+cd patchcrew
 uv sync --locked --group dev
 uv run python roundtable.py
 ```
@@ -209,11 +209,11 @@ Export settings before starting the service. `.env.example` documents them; `.en
 | `A2A_ZCODE_CONFIG` | Existing ZCode Desktop configuration |
 | `CODEX_HOME` | Existing Codex home override |
 
-Credentials stay in official client configuration. A2A Workbench does not bundle model binaries, API keys, or subscriptions.
+Credentials stay in official client configuration. PatchCrew does not bundle model binaries, API keys, or subscriptions.
 
 ## Safety boundary
 
-A2A Workbench is a single-user local development tool.
+PatchCrew is a single-user local development tool.
 
 - It binds to loopback by default.
 - Room IDs are routing boundaries, not secrets.
@@ -248,7 +248,7 @@ The design was informed by several open-source projects, while the implementatio
 - [Agent Room](https://github.com/agent-room-alkl/agent-room) — shared rooms, explicit collaboration turns, and durable project context.
 - [Peertable](https://github.com/kitepon/peertable) — long-lived peers and retained room history.
 
-A2A Workbench deliberately differs by keeping the user-facing model as the master, preserving one native conversation per room/member, and treating peer messages as discussion rather than execution authority. See [REFERENCES.md](REFERENCES.md) for the detailed adopted/rejected design choices and license notes.
+PatchCrew deliberately differs by keeping the user-facing model as the master, preserving one native conversation per room/member, and treating peer messages as discussion rather than execution authority. See [REFERENCES.md](REFERENCES.md) for the detailed adopted/rejected design choices and license notes.
 
 ## Product direction
 
@@ -267,7 +267,7 @@ Planned work includes configurable agent adapters, isolated workspace execution,
 
 ## Compatibility note
 
-The Python distribution and macOS LaunchAgent label retain `a2a-roundtable` in v0.3.x for compatibility. New MCP configuration and user-facing service metadata use **A2A Workbench**. The remaining compatibility identifiers will change only through an explicit migration.
+The Python distribution and macOS LaunchAgent label retain `a2a-roundtable` in v0.3.x for compatibility. New MCP configuration and user-facing service metadata use **PatchCrew**. The remaining compatibility identifiers will change only through an explicit migration.
 
 ## License
 

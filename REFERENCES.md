@@ -1,6 +1,6 @@
 # Design references and project boundaries
 
-A2A Workbench was informed by several open-source projects and the A2A specification. The implementation in this repository was written independently; no upstream source code was copied unless a future contribution explicitly records otherwise.
+PatchCrew was informed by several open-source projects and the A2A specification. The implementation in this repository was written independently; no upstream source code was copied unless a future contribution explicitly records otherwise.
 
 ## A2A Protocol
 
@@ -82,9 +82,9 @@ The following projects were also reviewed while defining the next delivery-orien
 | [agent-semaphore](https://github.com/alwh1te/agent-semaphore) | Scope leases, merge-tree conflict prediction, and a test-gated landing queue | Informed future integration safety; not implemented in v0.3 |
 | [git-stint](https://github.com/rchaz/git-stint) | Session-scoped branches, worktrees, checkpoints, and cleanup | Informed workspace lifecycle research; not included in v0.3 |
 
-These comparisons narrowed the product boundary: A2A Workbench should not become another terminal multiplexer or desktop IDE. Its distinct responsibility is durable, open collaboration context between independent agents, with execution and verified delivery added only through small reusable interfaces.
+These comparisons narrowed the product boundary: PatchCrew should not become another terminal multiplexer or desktop IDE. Its distinct responsibility is durable, open collaboration context between independent agents, with execution and verified delivery added only through small reusable interfaces.
 
-## What A2A Workbench adds
+## What PatchCrew adds
 
 The combination implemented here is:
 
