@@ -1,13 +1,12 @@
-import asyncio
-import json
-import tempfile
 import unittest
-from pathlib import Path
 
-from roundtable import RoundTable, extract_json_object, validate_plan
+try:
+    from .planning import extract_json_object, validate_plan
+except ImportError:  # direct unittest discovery from grid/
+    from planning import extract_json_object, validate_plan
 
 
-class RoundTableTests(unittest.TestCase):
+class PlanningTests(unittest.TestCase):
     def test_extract_fenced_json(self):
         value = extract_json_object('```json\n{"summary":"含 } 字符", "tasks": []}\n```')
         self.assertEqual(value["summary"], "含 } 字符")
@@ -22,44 +21,37 @@ class RoundTableTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "必须用依赖串行"):
             validate_plan(plan, ["pi", "codex"])
 
-    def test_full_roundtable_flow(self):
-        calls = []
+    def test_rejects_dependency_cycle(self):
+        plan = {
+            "tasks": [
+                {"id": "T1", "owner": "pi", "task": "检查 A", "depends_on": ["T2"]},
+                {"id": "T2", "owner": "codex", "task": "检查 B", "depends_on": ["T1"]},
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "任务依赖存在环"):
+            validate_plan(plan, ["pi", "codex"])
 
-        async def fake_call(agent, prompt):
-            calls.append((agent, prompt))
-            if "只返回 JSON" in prompt:
-                return json.dumps(
-                    {
-                        "summary": "两人并行只读检查",
-                        "tasks": [
-                            {"id": "T1", "owner": "pi", "task": "检查一", "mode": "analyze", "write_scope": "", "depends_on": [], "done_when": "返回一"},
-                            {"id": "T2", "owner": "codex", "task": "检查二", "mode": "analyze", "write_scope": "", "depends_on": [], "done_when": "返回二"},
-                        ],
-                    },
-                    ensure_ascii=False,
-                )
-            if "最终收口" in prompt:
-                return "圆桌完成"
-            if "交叉复核人" in prompt:
-                return "通过"
-            return f"{agent} 已完成"
+    def test_allows_transitively_serialized_writes_to_same_scope(self):
+        plan = {
+            "summary": "串行修改",
+            "tasks": [
+                {"id": "T1", "owner": "pi", "task": "改 A", "write_scope": "repo:x"},
+                {"id": "T2", "owner": "codex", "task": "检查 A", "depends_on": ["T1"]},
+                {
+                    "id": "T3",
+                    "owner": "pi",
+                    "task": "改 B",
+                    "mode": "EXECUTE",
+                    "write_scope": "repo:x",
+                    "depends_on": ["T2"],
+                },
+            ],
+        }
 
-        with tempfile.TemporaryDirectory() as temp:
-            table = RoundTable(
-                "验证圆桌",
-                "claude",
-                ["pi", "codex"],
-                caller=fake_call,
-                state_dir=Path(temp),
-            )
-            result = asyncio.run(table.run())
-            saved = json.loads(table.state_path.read_text(encoding="utf-8"))
+        normalized = validate_plan(plan, ["pi", "codex"])
 
-        self.assertEqual(result, "圆桌完成")
-        self.assertEqual(saved["status"], "completed")
-        self.assertEqual(set(saved["results"]), {"T1", "T2"})
-        self.assertEqual(set(saved["reviews"]), {"T1", "T2"})
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(normalized["summary"], "串行修改")
+        self.assertEqual(normalized["tasks"][2]["mode"], "execute")
 
 
 if __name__ == "__main__":

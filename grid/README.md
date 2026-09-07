@@ -60,14 +60,9 @@ python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/a2a_call.py pi \
 注意：新会话只保证原生对话历史归零，CLI 自身的跨会话记忆（如 Claude Code auto-memory）
 不受影响——context 是会话路由键，不是隔离边界。
 
-## 圆桌协作
+## 规划校验（内部模块）
 
-```bash
-python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/roundtable.py "审核并修复项目问题"
-python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/roundtable.py "只读评审" --moderator claude --agents pi codex dsh
-```
-
-主持人先生成带依赖关系的分工，成员并行或按依赖执行，随后交叉复核并由主持人汇总。相同 `write_scope` 的任务必须建立依赖串行，防止多个 Agent 同时修改同一范围。每次圆桌的计划、结果和复核记录保存在 `data/roundtables/<id>.json`；不需要交叉复核时可加 `--no-peer-review`。
+旧的 `roundtable.py` CLI 已移除。规划阶段仍有价值的纯逻辑保留在 `planning.py`，供内部调用：`extract_json_object` 从模型文本中提取 JSON object，`validate_plan` 规范化并校验任务计划，包括成员与模式约束、DAG 依赖环检测，以及要求相同 `write_scope` 的写任务通过依赖串行。该模块不负责调度或执行。
 
 ## 能力
 
@@ -76,7 +71,7 @@ python ~/a2a-agents/venv/Scripts/python.exe ~/a2a-agents/roundtable.py "只读�
 - 任务持久化（data/<agent>-tasks.db，SQLite，重启不丢；启动时对账把中断遗留的非终态任务标 FAILED）
 - 输入净化（限长 + 去控制字符 + 正确转义；POSIX 上 killpg 整树终止超时进程）
 - 流式声明（--stream）
-- 圆桌协作（主持分工、依赖调度、写冲突约束、交叉复核、最终收口）
+- 规划 JSON 提取与校验（内部纯模块，含 DAG 环检测和 `write_scope` 冲突约束）
 
 ## 怎么加新 agent
 

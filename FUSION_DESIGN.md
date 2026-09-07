@@ -356,10 +356,13 @@ queued → preparing_workspace → dispatching → running
 - Agent-to-Agent task proposal / handoff；
 - 可验证的完成条件。
 
-### 迁移后删除
+### 已完成的收敛
 
-- `grid/room.py`：第二套文件房间。
-- `grid/roundtable.py`：DAG 能力迁入 Control Plane 后删除第二套编排器。
+- `grid/room.py` 已删除：持久协作统一由 `rooms/` 承担。
+- 旧 `grid/roundtable.py` CLI 已删除；DAG、环检测与 `write_scope` 冲突校验保留为 `grid/planning.py` 纯模块。
+
+### 后续仍需收敛
+
 - 固定四 Agent server：替换为配置驱动的通用 worker factory。
 - 只输出文本、不暴露任务状态的生产调用路径。
 
