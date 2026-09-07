@@ -1,0 +1,7 @@
+# 行尾统一 LF：跨 Windows/WSL 双侧开发，CRLF 混入会让 git apply 的补丁上下文
+# 对不上基线（2026-09-07 真实事故：clean-verifier 拒绝了一份本正确的补丁）。
+* text=auto eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.json text eol=lf
