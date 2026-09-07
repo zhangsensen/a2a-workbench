@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 import json
 import os
 import re
@@ -186,9 +187,94 @@ def init_tasks(path: Path) -> None:
     path.write_text(json.dumps(skeleton, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _verification_conclusion(row: dict) -> str:
+    state = row["state"]
+    if state == "verified":
+        return "双侧通过"
+    if state == "refuted":
+        failures = row.get("verification_failures", [])
+        if not failures:
+            return "验收失败（失败项未知）"
+        return "；".join(
+            f"{item['side']} 第{item['index']}项失败" for item in failures
+        )
+    if state == "delivered":
+        return "未验证"
+    if state == "contract-changed":
+        paths = row.get("protected_changed", [])
+        return "动了保护文件：" + ("、".join(paths) if paths else "未知")
+    if state == "no-change":
+        return "无改动"
+    if state == "failed":
+        return "agent 失败"
+    if state == "error":
+        return "执行错误"
+    return row.get("detail") or state
+
+
+def build_card(row: dict, all_rows: list[dict]) -> str:
+    """纯函数渲染单任务交付卡；所有判断只依赖已收集的 row 数据。"""
+    changed_files = row.get("changed_files", [])
+    other_files = {
+        path
+        for other in all_rows
+        if other.get("name") != row.get("name")
+        for path in other.get("changed_files", [])
+    }
+    overlaps = sorted(set(changed_files) & other_files)
+    diffstat_lines = row.get("diffstat_lines")
+    if diffstat_lines is None:
+        diffstat_lines = sum(
+            int(value)
+            for value in re.findall(
+                r"(\d+) (?:insertion|deletion)s?\([+-]\)", row.get("diffstat", ""),
+            )
+        )
+    large_change = len(changed_files) > 15 or diffstat_lines > 500
+
+    risks = []
+    if overlaps:
+        risks.append("重叠文件：" + "、".join(overlaps))
+    if large_change:
+        risks.append("大改动")
+    risk_text = "；".join(risks) if risks else "无"
+
+    state = row["state"]
+    if state in {"refuted", "contract-changed", "failed", "error", "no-change"}:
+        suggestion = "驳回/打回"
+    elif state == "delivered" or overlaps or large_change:
+        suggestion = "需复核"
+    elif state == "verified":
+        suggestion = "可合并"
+    else:
+        suggestion = "需复核"
+
+    commit = " | ".join(str(row.get("commit", "(无)")).splitlines()) or "(无)"
+    lines = [
+        "[交付卡]",
+        f"  任务/agent/state : {row['name']} / {row['agent']} / {state}",
+        f"  commit           : {commit}",
+        "  改动文件         :",
+    ]
+    if changed_files:
+        lines.extend(f"    - {path}" for path in changed_files[:10])
+        if len(changed_files) > 10:
+            lines.append(f"    +{len(changed_files) - 10} more")
+    else:
+        lines.append("    无")
+    lines.extend([
+        f"  验证结论         : {_verification_conclusion(row)}",
+        f"  风险             : {risk_text}",
+        f"  建议             : {suggestion}",
+    ])
+    return "\n".join(lines)
+
+
 async def run_dispatch(
     repo: Path, tasks: list[dict], out: Path, keep: bool, caller: Caller = call_agent,
 ) -> list[dict]:
+    run_started = time.time()
+    run_clock_started = time.perf_counter()
     frozen_tasks: list[dict] = []
     for task in tasks:
         contract = json.loads(json.dumps(_freeze_contract(task), ensure_ascii=False))
@@ -249,6 +335,14 @@ async def run_dispatch(
             "state": "delivered",
             "detail": "",
             "contract": str(contract_path),
+            "agent_started": 0.0,
+            "agent_finished": 0.0,
+            "agent_seconds": 0.0,
+            "verify_seconds": 0.0,
+            "changed_files": [],
+            "diffstat_lines": 0,
+            "verification_failures": [],
+            "protected_changed": [],
         }
         print(f"[进度] {name} 开始 (agent={task['agent']})", flush=True)
 
@@ -271,11 +365,25 @@ async def run_dispatch(
             commit = _git(tree, "log", "--oneline", f"{base_sha}..HEAD") or "(未提交)"
             diff = _git(tree, "diff", "--cached", base_sha)
             diffstat = _git(tree, "diff", "--cached", "--stat", base_sha) or "(无改动)"
+            changed = _git(tree, "diff", "--cached", "--name-only", base_sha)
+            numstat = _git(tree, "diff", "--cached", "--numstat", base_sha)
+            diffstat_lines = sum(
+                int(value)
+                for line in numstat.splitlines()
+                for value in line.split("\t", 2)[:2]
+                if value.isdigit()
+            )
             patch = out / f"{stamp}-{name}.patch"
             patch.write_text(
                 diff + ("\n" if diff and not diff.endswith("\n") else ""), encoding="utf-8",
             )
-            return {"commit": commit, "diffstat": diffstat, "patch": str(patch)}
+            return {
+                "commit": commit,
+                "diffstat": diffstat,
+                "diffstat_lines": diffstat_lines,
+                "changed_files": changed.splitlines() if changed else [],
+                "patch": str(patch),
+            }
 
         def compare_protected_sync() -> list[dict]:
             changes = []
@@ -325,8 +433,21 @@ async def run_dispatch(
                 body += "\n"
             return body + "--- agent 回复摘要 ---\n" + row.get("reply_tail", "")
 
+        async def timed_checks(check_tree: Path) -> list[dict]:
+            started = time.perf_counter()
+            try:
+                return await asyncio.to_thread(run_checks, check_tree, contract["verify"])
+            finally:
+                row["verify_seconds"] += time.perf_counter() - started
+
+        row["agent_started"] = time.time()
+        agent_clock_started = time.perf_counter()
         try:
-            reply = await caller(task["agent"], prompt, cwd=str(tree))
+            try:
+                reply = await caller(task["agent"], prompt, cwd=str(tree))
+            finally:
+                row["agent_finished"] = time.time()
+                row["agent_seconds"] = time.perf_counter() - agent_clock_started
             row["reply_tail"] = reply[-800:]
         except AgentTaskFailed as failure:
             row.update(state="failed", detail=f"[{failure.state}] {failure.text[:500]}")
@@ -350,6 +471,9 @@ async def run_dispatch(
                 no_change = row["commit"] == "(未提交)" and row["diffstat"] == "(无改动)"
                 protected = await asyncio.to_thread(compare_protected_sync)
                 contract_changed = any(item["changed"] for item in protected)
+                row["protected_changed"] = [
+                    item["path"] for item in protected if item["changed"]
+                ]
 
                 if contract_changed:
                     row.update(state="contract-changed", detail="protected 文件与冻结合约不一致")
@@ -371,7 +495,7 @@ async def run_dispatch(
                     else:
                         row["state"] = "delivered"
                 else:
-                    candidate = await asyncio.to_thread(run_checks, tree, contract["verify"])
+                    candidate = await timed_checks(tree)
                     baseline = None
                     verdict = "refuted"
                     if all(item["passed"] for item in candidate):
@@ -379,11 +503,16 @@ async def run_dispatch(
                         verifier_trees[name] = verifier_tree
                         async with verifier_tree_lock:
                             await asyncio.to_thread(prepare_clean_verifier_sync, verifier_tree)
-                        baseline = await asyncio.to_thread(
-                            run_checks, verifier_tree, contract["verify"],
-                        )
+                        baseline = await timed_checks(verifier_tree)
                         if all(item["passed"] for item in baseline):
                             verdict = "no-change" if mode == "modify" and no_change else "verified"
+
+                    row["verification_failures"] = [
+                        {"side": side, "index": index}
+                        for side, results in (("candidate", candidate), ("baseline", baseline or []))
+                        for index, item in enumerate(results, 1)
+                        if not item["passed"]
+                    ]
 
                     evidence = {
                         "contract_digest": task["contract_digest"],
@@ -419,6 +548,19 @@ async def run_dispatch(
             subprocess.run(["git", "-C", str(base), "worktree", "remove", "--force", str(tree)],
                            capture_output=True, timeout=120)
         _rmtree_force(work)
+
+    run_finished = time.time()
+    run_report = {
+        "run_started": run_started,
+        "run_finished": run_finished,
+        "total_seconds": time.perf_counter() - run_clock_started,
+        "state_counts": dict(sorted(Counter(row["state"] for row in rows).items())),
+        "tasks": list(rows),
+    }
+    run_path = out / f"{stamp}-run.json"
+    run_path.write_text(
+        json.dumps(run_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
     return list(rows)
 
 
@@ -469,6 +611,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{'':<34}evidence: {row['evidence']}")
         if row.get("log"):
             print(f"{'':<34}log: {row['log']}")
+    for row in rows:
+        print("\n" + build_card(row, rows))
     return 1 if failed else 0
 
 

@@ -18,7 +18,7 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 
 from a2a_call import AgentTaskFailed  # noqa: E402
-from dispatch import init_tasks, load_tasks, main, run_dispatch  # noqa: E402
+from dispatch import build_card, init_tasks, load_tasks, main, run_dispatch  # noqa: E402
 
 
 def _git(repo, *args):
@@ -321,6 +321,56 @@ class TestDispatch(unittest.TestCase):
             self.assertEqual(frozen["contract_digest"], hashlib.sha256(canonical).hexdigest())
             digests.append(frozen["contract_digest"])
         self.assertEqual(digests[0], digests[1])
+
+    def test_run_report_contains_task_and_run_metrics(self):
+        async def fake_caller(_agent, _prompt, cwd=None, **_kw):
+            (Path(cwd) / "b.txt").write_text("done\n", encoding="utf-8")
+            return "done"
+
+        tasks = [{
+            "agent": "codex",
+            "name": "metrics",
+            "task": "写文件并记录度量",
+            "verify": [{
+                "type": "command",
+                "argv": [sys.executable, "-c", "from pathlib import Path; assert Path('b.txt').exists()"],
+            }],
+        }]
+        row = asyncio.run(
+            run_dispatch(self.repo, tasks, self.out, keep=False, caller=fake_caller)
+        )[0]
+
+        report_path = next(self.out.glob("*-run.json"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        measured = report["tasks"][0]
+        self.assertEqual(measured["name"], row["name"])
+        self.assertGreater(measured["agent_started"], 0)
+        self.assertGreaterEqual(measured["agent_finished"], measured["agent_started"])
+        self.assertGreaterEqual(measured["agent_seconds"], 0)
+        self.assertGreaterEqual(measured["verify_seconds"], 0)
+        self.assertEqual(measured["changed_files"], ["b.txt"])
+        self.assertGreaterEqual(report["run_finished"], report["run_started"])
+        self.assertGreaterEqual(report["total_seconds"], 0)
+        self.assertEqual(report["state_counts"], {"verified": 1})
+
+    def test_delivery_card_marks_overlapping_files_for_review(self):
+        rows = [
+            {
+                "name": "one", "agent": "codex", "state": "verified",
+                "commit": "abc one", "changed_files": ["shared.txt"],
+                "diffstat_lines": 1,
+            },
+            {
+                "name": "two", "agent": "dsh", "state": "verified",
+                "commit": "def two", "changed_files": ["shared.txt"],
+                "diffstat_lines": 1,
+            },
+        ]
+
+        card = build_card(rows[0], rows)
+
+        self.assertIn("重叠文件：shared.txt", card)
+        self.assertIn("建议             : 需复核", card)
 
     def test_check_mode_only_validates_tasks(self):
         tasks_path = Path(self.dir.name) / "tasks.json"
