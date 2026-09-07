@@ -1,100 +1,199 @@
-# A2A Roundtable · 常驻圆桌
+# A2A Workbench · 开放式 Coding Agent 协作工作台
 
-**你只和 master 沟通，它带着多个 AI 持续讨论；不同议题各自保留上下文。**
+**让彼此独立的 Coding Agent 持续协作，而不是被锁在某个主 Agent 的私有 subagent 树里。**
 
-[English](README.md) · [Master 主持流程](MASTER.md) · [运行说明](OPERATIONS.md) · [安全边界](SECURITY.md)
+[English](README.md) · [Master 主持流程](MASTER.md) · [运行说明](OPERATIONS.md) · [安全边界](SECURITY.md) · [参与贡献](CONTRIBUTING.md)
 
-这是一个供主模型调用的本地常驻 A2A 服务。你提出问题，master 选择该问 Codex、Claude Code 还是 ZCode，读完回答后决定追问、交叉质疑或结束讨论，最后直接向你汇报。你不需要操作页面、点选成员或手动搬运消息。
+> **当前公开版本：** 已实现基于 MCP、HTTP 和标准 A2A 1.0 的持久协作房间。隔离 worktree 执行和机器验证交付是下一层产品能力，尚未作为当前公开版本的已交付功能宣传。
 
-master 是当前与你对话、接入 MCP 的模型；服务本身不再启动一个额外的自主 master。每个房间的每位成员都有自己的原生会话；下一次追问延续原来的上下文，服务重启后按保存的会话 ID 恢复。
+## 为什么做 A2A Workbench
 
-## 能做什么
+真实软件开发正在同时使用多个 Agent：一个调查、一个实现、一个测试、一个审查。今天通常由人充当路由器，在多个终端之间复制背景、转述决定、追问进度，并在会话结束后重新拼接发生了什么。
 
-- 多个独立房间，消息、任务、草稿、已读位置、成员会话分别保存。
-- master 按需单独咨询成员，每次回答后由 master 决定下一步；不要求所有成员机械轮流发言。
-- master 可保存本房间的目标、摘要、剩余分歧、下一步；恢复时只读主持进度和后续新发言。
-- 一次选择成员，讨论 1–5 轮；后发言者能看到前面成员的新观点，完成后待命。
-- 页面、HTTP、标准 A2A v1.0 和 MCP 共用同一份房间数据。
-- 每次只追加成员未读的发言，不反复拼装整段历史。
-- 空闲时不自动发起模型对话；MCP 重连不重建模型会话。
+A2A Workbench 提供一层持久协作基础：
 
-最多 8 个常驻房间。多个房间可以同时提交任务，模型生成由一个队列依次调度。
+- **独立 Agent，不是私有子代理**：参与者保留自己的运行时、身份和原生会话。
+- **议题级持久上下文**：每个房间独立保存事件、未读游标、成员会话、任务和主持检查点。
+- **Master 主导**：当前与用户对话的模型选择咨询谁、是否追问、何时结束，并承担最终判断。
+- **开放入口**：网页、HTTP、MCP 和标准 A2A 1.0 共用同一份房间状态。
+- **本地优先**：SQLite 保存在本机；模型凭据继续由官方客户端管理。
+- **保守恢复**：结果不确定的中断不会被静默重放。
 
-## 安装
+项目的北极星只有一个：
 
-完整三模型链路在 macOS / Python 3.13 上验证。项目要求 Python 3.11+；常驻管理使用 macOS LaunchAgent。先安装 uv、官方 Codex / Claude Code / ZCode，并在客户端完成自己的登录。服务不提供模型账号或额度。
+> **减少从一个目标到经过验收的工程结果所需的总时间和人工协调。**
+
+## 当前已实现
+
+### 持久房间
+
+每个议题使用明确的房间 ID。消息、任务、未读位置、原生会话、草稿和 Master 检查点全部按房间隔离，没有隐式默认房间。
+
+### 原生会话连续性
+
+每个 `(room, member)` 有独立的原生会话。下一次咨询只追加该成员尚未看到的房间事件。服务重启后恢复已保存的原生会话 ID，而不是每次重放整段 transcript。
+
+### 自适应 Master 咨询
+
+当前调用 MCP 的模型就是 Master。它可以：
+
+1. 恢复房间检查点和后续新事件；
+2. 针对当前不确定性选择一名成员；
+3. 读取真实回答；
+4. 必要时让另一位成员挑战具体观点；
+5. 保存剩余分歧和下一步；
+6. 最终直接向用户汇报自己的判断。
+
+服务不会额外启动第二个自主 Master，也不会要求所有成员机械轮流发言。
+
+### 有限轮次圆桌
+
+需要固定讨论时，可选择成员并设置 1–5 轮。成员按顺序发言，只看到新增事件，轮次结束后任务即结束。
+
+### 可恢复、可审计的任务
+
+- 相同请求的精确重试具有幂等性；
+- Master 检查点使用 revision 防止旧摘要覆盖新进展；
+- 服务重启时，结果不确定的运行中任务变为 `interrupted`，不会盲目重复调用模型；
+- 查询和取消任务必须同时验证房间与任务归属。
+
+## 架构
+
+```mermaid
+flowchart LR
+    U[用户] --> M[MCP 客户端中的 Master]
+    M --> H[A2A Workbench Host]
+    H --> DB[(SQLite：房间 / 事件 / 任务 / 游标 / 检查点)]
+    H --> Q[串行讨论队列]
+    Q --> C[每房间独立 Codex 会话]
+    Q --> A[每房间独立 Claude 会话]
+    Q --> Z[每房间独立 ZCode 会话]
+    H <--> I[网页 / HTTP / MCP / A2A 1.0]
+```
+
+当前最多支持 8 个 warm rooms。多个房间可以排队提交任务，但模型生成串行执行。持久会话不代表无限上下文，仍受模型窗口、压缩和供应商缓存规则限制。
+
+## 快速开始
+
+### 依赖
+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- 至少一个已经安装并登录的官方 Coding Agent 客户端
+
+| 成员 | 适配方式 | 本地已有配置 |
+|---|---|---|
+| Codex | `codex app-server` | Codex 账号和本地配置 |
+| Claude Code | `claude -p` + stream JSON | Claude Code 登录，默认 `sonnet` |
+| ZCode | 官方 `zcode app-server` | ZCode Desktop provider 配置 |
 
 ```bash
-git clone https://github.com/zhangsensen/a2a-roundtable.git
-cd a2a-roundtable
+git clone https://github.com/zhangsensen/a2a-workbench.git
+cd a2a-workbench
 uv sync --locked --group dev
 uv run python roundtable.py
 ```
 
-另开终端执行 `uv run python service.py mcp-config`，把输出接入主模型的 MCP 客户端并重连，然后直接告诉主模型：“和 Claude、ZCode 讨论这个问题，重点找分歧，最后给我你的判断。”房间由主模型通过工具选择或创建。具体流程见 [MASTER.md](MASTER.md)。现有网页 **http://127.0.0.1:41241/** 是可选入口。
+可选网页入口：
 
-常驻运行：先用 Ctrl-C 结束前台进程，再执行：
-
-```bash
-uv run python service.py install
-uv run python service.py status
+```text
+http://127.0.0.1:41241/
 ```
 
-安装只创建本项目自己的服务，不改写其他客户端设置，也不停止其他服务。若端口已有服务占用，用 `A2A_PORT=41243` 选择别的端口，服务和调用方保持一致。
-
-## 房间使用规则
-
-1. 同一个持续问题用同一房间；独立议题新建房间。
-2. 房间 ID 是唯一标识，名称相似也不能混用。
-3. MCP 发言、读历史、查任务、取消任务都必须带 `room`，没有默认落点。
-4. 任务查询和取消同时核对房间 ID 与任务 ID，跨房间请求会被拒绝。
-5. A2A 的 `contextId` 必须对应已有房间；未知房间先显式创建。跨房间任务引用会被拒绝。
-6. 模型调用前与回复落盘前都核对成员、房间、任务。数据库禁止两个成员绑定同一个原生会话 ID。
-7. 网页按房间保存草稿、参与成员和轮数；切房后丢弃其他房间迟到的响应。
-
-## MCP 接入
+另开终端输出 MCP 配置：
 
 ```bash
 uv run python service.py mcp-config
 ```
 
-将输出添加到客户端支持的 MCP 设置中，并重连 MCP。工具包括：
+把输出加入 Master 客户端并重连，然后让 Master 创建或复用房间、咨询适合的成员。完整流程见 [MASTER.md](MASTER.md)。
+
+## MCP 主流程
+
+```text
+roundtable_rooms / roundtable_create_room
+→ roundtable_context
+→ roundtable_consult
+→ roundtable_job
+→ 必要的后续咨询
+→ roundtable_checkpoint
+→ Master 向用户汇报
+```
+
+核心工具：
 
 | 工具 | 用途 |
 |---|---|
-| `roundtable_rooms` / `roundtable_create_room` | 列出或创建房间 |
-| `roundtable_status` | 查看常驻服务和成员状态 |
-| `roundtable_context` | 恢复本房间的主持进度，分页读取进度之后的新发言 |
-| `roundtable_consult` | master 指定一位成员咨询一次，返回任务回执 |
-| `roundtable_checkpoint` | 保存 master 的目标、摘要、分歧和下一步，校验修订号与房间归属 |
-| `roundtable_post` | 指定房间发起有限轮数讨论 |
-| `roundtable_history` | 读取该房间消息，不清空历史 |
-| `roundtable_job` | 用 `room` 与 `id` 查询任务结果，可等待 0–25 秒，无额外模型调用 |
-| `roundtable_cancel` | 停止指定房间的任务，保留已完成发言 |
+| `roundtable_rooms` | 列出持久房间 |
+| `roundtable_create_room` | 创建议题房间 |
+| `roundtable_context` | 恢复主持检查点和后续事件 |
+| `roundtable_consult` | 指定一名持久成员咨询一次 |
+| `roundtable_job` | 查询任务回执和真实回答 |
+| `roundtable_checkpoint` | 保存目标、摘要、分歧和下一步 |
+| `roundtable_post` | 发起固定 1–5 轮讨论 |
+| `roundtable_history` | 读取历史，不消费消息 |
+| `roundtable_cancel` | 取消指定房间中的任务 |
 
-master 单独咨询示例（`requestId` 在不确定重试时保持一致）：
+回执不等于答案。应使用 `roundtable_job` 等待终态，不要通过重复提交来轮询。
 
-```json
-{"room":"architecture","member":"claude","text":"请找出当前方案最薄弱的假设，并说明需要什么证据。","requestId":"review-001"}
-```
+## HTTP 示例
 
-回执不等于答案。master 用 `roundtable_job` 读到实际回答，再决定是否请另一位成员质疑、补充证据或直接收尾。主持进度由 master 归纳并保存，其他成员的原生上下文不会被这个摘要替换。
-
-保留的固定轮次命令行入口同样必须指定房间：
+创建房间：
 
 ```bash
-uv run python ask.py --context-id lobby '继续刚才的讨论'
+curl -sS http://127.0.0.1:41241/api/rooms \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"architecture","title":"架构讨论"}'
 ```
 
-## 配置、恢复与验证
+发起一轮讨论：
 
-环境变量见 [英文 README](README.md#configuration) 和 `.env.example`。项目不自动读取 `.env`，不需要把密钥写入本项目。
+```bash
+curl -sS http://127.0.0.1:41241/api/rooms/architecture/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"审核迁移方案。","members":["codex","claude"],"rounds":1,"requestId":"architecture-review-001"}'
+```
 
-- Codex 通过官方 app-server 使用本机登录与默认模型。
-- Claude 使用官方 Claude Code 登录，验收渠道为 Max，默认 `sonnet`。
-- ZCode 通过官方 app-server 使用 Desktop 已有的 `builtin:zai-coding-plan`，默认 `GLM-5.3-Flash`。
+查询结果：
 
-常驻进程退出后恢复原生会话；中断且结果不确定的轮次不静默重放，以免重复调用。长对话仍受模型上下文窗口、压缩和供应商缓存规则约束。常驻不等于无限上下文或推理免费。
+```bash
+curl -sS 'http://127.0.0.1:41241/api/jobs/JOB_ID?room=architecture'
+```
+
+只有在响应丢失、内容完全相同时，才复用原 `requestId` 重试。
+
+## 配置
+
+启动服务前导出环境变量。`.env.example` 只作说明，项目不会自动加载 `.env`。
+
+| 变量 | 用途 |
+|---|---|
+| `A2A_PORT` | 回环服务端口，默认 `41241` |
+| `A2A_ROOM_DATA` | 持久房间数据目录 |
+| `A2A_CODEX_BIN` | Codex 可执行文件覆盖 |
+| `A2A_CLAUDE_BIN` | Claude 可执行文件覆盖 |
+| `A2A_ZCODE_BIN` | ZCode 可执行文件覆盖 |
+| `A2A_CLAUDE_MODEL` | Claude 模型别名，默认 `sonnet` |
+| `A2A_ZCODE_MODEL` | ZCode 模型，默认 `GLM-5.3-Flash` |
+| `A2A_ZCODE_CONFIG` | 已有 ZCode Desktop 配置 |
+| `CODEX_HOME` | 已有 Codex home 覆盖 |
+
+Workbench 不捆绑模型二进制、API Key 或订阅；凭据留在官方客户端中。
+
+## 安全边界
+
+A2A Workbench 当前是单用户本地开发工具：
+
+- 默认只监听回环地址；
+-房间 ID 是路由边界，不是密钥；
+-Peer 发言不能授权文件修改、Shell 执行、部署、外部消息或新增后台工作；
+-Claude 禁用工具，Codex 使用只读 sandbox，ZCode 使用 plan 模式和有限工具；
+-这些设置不是操作系统级沙箱，只运行你信任的客户端；
+-不要在没有额外认证和隔离的情况下通过公网代理暴露。
+
+详见 [SECURITY.md](SECURITY.md)。
+
+## 验证
 
 ```bash
 uv run pytest -q
@@ -102,10 +201,32 @@ node --check roundtable_ui.js
 python3 scripts/check_publication.py --worktree
 ```
 
-自动测试使用假模型。`native_acceptance.py` 和 `native_room_acceptance.py` 会真实调用模型并消耗额度，验收结果仅保存在本地忽略目录。
+离线测试使用假成员，不需要模型订阅。以下真实模型验收会消耗额度：
 
-本项目提供本机议题隔离，不提供不同用户之间的权限隔离。仅监听回环地址，不要通过公网代理暴露。客户端工具限制也不是操作系统级沙箱，详见 [SECURITY.md](SECURITY.md)。
+```bash
+uv run python native_acceptance.py
+uv run python native_room_acceptance.py
+```
+
+## 产品方向
+
+当前公开版本先建立协作和上下文层。下一层是经过验证的代码交付闭环：
+
+```text
+一个用户目标
+→ 一个 Master
+→ 独立 Agent 在隔离 worktree 中开发
+→ 机器验证交付
+→ Master 集成
+→ 结果回到同一份持久上下文
+```
+
+规划中的能力包括可配置 Agent Adapter、隔离 workspace、结构化 Delivery Evidence，以及将持久房间连接到经过验证的代码修改。在它们进入公开仓库前，不作为当前版本已交付功能宣传。
+
+## 兼容性说明
+
+内部 Python 包和 MCP Server 暂时保留 `a2a-roundtable` 标识，避免现有安装立即失效；GitHub 仓库与产品名称已经升级为 **A2A Workbench**。兼容标识只会通过明确迁移修改。
 
 ## 许可证
 
-项目代码使用 [MIT](LICENSE)；第三方 SDK、客户端和模型账号遵循各自许可证与服务条款。
+项目代码使用 [MIT](LICENSE)。第三方 SDK、模型客户端和账号遵循各自许可证与服务条款。
