@@ -40,7 +40,7 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 
 from a2a_call import AgentTaskFailed, call_agent, load_catalog  # noqa: E402
-from delivery import (  # noqa: E402
+from workbench_core.delivery import (  # noqa: E402
     build_card,
     collect_git_evidence,
     compare_protected,
@@ -52,8 +52,14 @@ from delivery import (  # noqa: E402
     write_failure_log,
     write_run_report,
 )
-from verification import contract_digest, run_checks  # noqa: E402
-from workspace import (  # noqa: E402
+from workbench_core.verification import (  # noqa: E402
+    contract_digest,
+    freeze_contract,
+    protected_paths,
+    run_checks,
+    valid_relative_path,
+)
+from workbench_core.workspace import (  # noqa: E402
     cleanup_task_workspaces,
     create_clean_verifier_worktree,
     create_task_workspaces,
@@ -70,27 +76,20 @@ DISCIPLINE = (
 
 
 def _valid_relative_path(raw_path: object) -> bool:
-    return (isinstance(raw_path, str) and bool(raw_path) and
-            not Path(raw_path).is_absolute() and ".." not in Path(raw_path).parts)
+    return valid_relative_path(raw_path)
 
 
 def _protected_paths(task: dict) -> list[str]:
     """合并显式 protected 与 file 检查路径；集合按路径排序以稳定摘要。"""
-    paths = list(task.get("protected", []))
-    for check in task.get("verify") or []:
-        if check.get("type") == "file":
-            paths.append(check["path"])
-    return sorted(set(paths))
+    return protected_paths(task.get("verify"), task.get("protected"))
 
 
 def _freeze_contract(task: dict) -> dict:
     """仅保留会影响验收语义的字段，后续检查不得再读取原始 task。"""
-    return {
-        "task": task["task"],
-        "mode": task.get("mode", "modify"),
-        "verify": task.get("verify"),
-        "protected": _protected_paths(task),
-    }
+    return freeze_contract(
+        task["task"], task.get("mode", "modify"), task.get("verify"),
+        task.get("protected"),
+    )
 
 
 def load_tasks(path: Path) -> list[dict]:

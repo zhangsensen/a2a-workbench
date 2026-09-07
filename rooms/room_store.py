@@ -68,6 +68,10 @@ class RoomStore:
                 db.execute('ALTER TABLE jobs ADD COLUMN executor TEXT')
             if 'cwd' not in job_columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN cwd TEXT')
+            if 'execution_contract' not in job_columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN execution_contract TEXT')
+            if 'execution_baseline' not in job_columns:
+                db.execute('ALTER TABLE jobs ADD COLUMN execution_baseline TEXT')
             if 'metadata' not in {r['name'] for r in db.execute('PRAGMA table_info(events)')}:
                 db.execute('ALTER TABLE events ADD COLUMN metadata TEXT')
             attempt_columns = {
@@ -180,7 +184,10 @@ class RoomStore:
             db.execute("INSERT INTO jobs(id,room,prompt,members,rounds,state,error,created,updated,speaker) VALUES (?,?,?,?,?,'queued',NULL,?,?,?)", (key, room, prompt, json.dumps(members), rounds, now, now, speaker))
         return self.job(key)
 
-    def submit_execute(self, room, prompt, executor, key, speaker='master', cwd=None):
+    def submit_execute(
+        self, room, prompt, executor, key, speaker='master', cwd=None,
+        execution_contract=None, execution_baseline=None,
+    ):
         current = self.room(room)
         if current['archived_at'] is not None:
             self.unarchive_room(room)  # New activity automatically revives an archived room.
@@ -196,19 +203,57 @@ class RoomStore:
             if not isinstance(cwd, str) or not cwd.strip():
                 raise ValueError('cwd must be a nonempty string')
             cwd = cwd.strip()
+        encoded_contract = (
+            None if execution_contract is None else
+            json.dumps(execution_contract, sort_keys=True, ensure_ascii=False)
+        )
+        encoded_baseline = (
+            None if execution_baseline is None else
+            json.dumps(execution_baseline, sort_keys=True, ensure_ascii=False)
+        )
         with self.connect() as db:
             previous = db.execute('SELECT * FROM jobs WHERE id=?', (key,)).fetchone()
             if previous:
-                old = (previous['room'], previous['prompt'], previous['executor'], previous['speaker'], previous['kind'], previous['cwd'])
-                if old != (room, prompt, executor, speaker, 'execute', cwd):
+                old = (
+                    previous['room'], previous['prompt'], previous['executor'],
+                    previous['speaker'], previous['kind'], previous['cwd'],
+                    previous['execution_contract'],
+                )
+                if old != (
+                    room, prompt, executor, speaker, 'execute', cwd, encoded_contract,
+                ):
                     raise ValueError('Request ID already used for different content')
                 return self.job(key)
             now = time.time()
             db.execute("""INSERT INTO jobs(
-                id,room,prompt,members,rounds,state,error,created,updated,speaker,kind,executor,cwd
-                ) VALUES (?,?,?,'[]',1,'queued',NULL,?,?,?,'execute',?,?)""",
-                (key, room, prompt, now, now, speaker, executor, cwd))
+                id,room,prompt,members,rounds,state,error,created,updated,speaker,
+                kind,executor,cwd,execution_contract,execution_baseline
+                ) VALUES (?,?,?,'[]',1,'queued',NULL,?,?,?,'execute',?,?,?,?)""",
+                (
+                    key, room, prompt, now, now, speaker, executor, cwd,
+                    encoded_contract, encoded_baseline,
+                ))
         return self.job(key)
+
+    def execution_contract(self, key):
+        with self.connect() as db:
+            row = db.execute(
+                'SELECT execution_contract FROM jobs WHERE id=? AND kind=\'execute\'',
+                (key,),
+            ).fetchone()
+            if not row:
+                raise KeyError(key)
+            return json.loads(row['execution_contract']) if row['execution_contract'] else None
+
+    def execution_baseline(self, key):
+        with self.connect() as db:
+            row = db.execute(
+                'SELECT execution_baseline FROM jobs WHERE id=? AND kind=\'execute\'',
+                (key,),
+            ).fetchone()
+            if not row:
+                raise KeyError(key)
+            return json.loads(row['execution_baseline']) if row['execution_baseline'] else None
 
     def add_attempt(self, job, endpoint):
         now = time.time()
@@ -270,6 +315,9 @@ class RoomStore:
             if not row or (room is not None and row['room'] != room):
                 raise KeyError(key)
             result = dict(row)
+            # 验收合约与基准是 rooms 的内部编排状态；保持既有 job API 形状。
+            result.pop('execution_contract', None)
+            result.pop('execution_baseline', None)
             result['members'] = json.loads(result['members'])
             result['events'] = [dict(r) for r in db.execute("SELECT * FROM events WHERE job=? AND room=? ORDER BY seq", (key, row['room']))]
             return result

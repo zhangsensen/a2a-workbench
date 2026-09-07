@@ -100,6 +100,8 @@ def test_execute_job_lifecycle_and_result_event(tmp_path, monkeypatch):
     assert metadata['cwd'] is None
     assert metadata['duration'] == 1.25
     assert metadata['attempt'] == 1
+    assert 'delivery' not in metadata
+    assert 'evidence' not in metadata
 
 
 def test_execute_does_not_block_discussion_queue(tmp_path, monkeypatch):
@@ -592,13 +594,20 @@ def test_mcp_execute_requires_fields_and_forwards(monkeypatch):
     result = roundtable_mcp.call('roundtable_execute', {
         'room': 'work', 'executor': 'codex', 'text': 'Build', 'requestId': 'exec-1',
         'cwd': '/workspace/project',
+        'mode': 'inspect',
+        'verify': [{'type': 'file', 'path': 'result.txt'}],
+        'protected': ['locked.txt'],
     })
     assert result == {'id': 'job'}
     assert calls == [('/api/rooms/work/execute', {
         'executor': 'codex', 'text': 'Build', 'requestId': 'exec-1',
         'cwd': '/workspace/project',
+        'mode': 'inspect',
+        'verify': [{'type': 'file', 'path': 'result.txt'}],
+        'protected': ['locked.txt'],
     })]
     assert tool['inputSchema']['properties']['cwd']['minLength'] == 1
+    assert tool['inputSchema']['properties']['mode']['enum'] == ['modify', 'inspect']
 
 
 def test_reconcile_does_not_flag_running_remote_as_unknown(tmp_path, monkeypatch):

@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -22,7 +21,15 @@ from a2a.helpers import new_text_message
 from a2a.types import CancelTaskRequest, GetTaskRequest, Role, SendMessageRequest, TaskState
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from workbench_core.delivery import (
+    collect_git_evidence,
+    compare_protected,
+    snapshot_protected,
+)
+from workbench_core.verification import contract_digest, freeze_contract, run_checks
+from workbench_core.workspace import git
 
 from room_agents import Member
 from settings import ROOT, DATA, PORT, BASE_URL, VERSION, EXECUTORS
@@ -182,14 +189,56 @@ def execution_metadata(job, attempt, duration):
         }
         for field, command in commands.items():
             try:
-                result = subprocess.run(
-                    command, capture_output=True, text=True, timeout=5, check=False
-                )
-                if result.returncode == 0:
-                    metadata[field] = result.stdout.strip()
-            except (OSError, subprocess.TimeoutExpired):
+                metadata[field] = git(Path(cwd), *command[3:], timeout=5)
+            except (OSError, RuntimeError):
                 pass
     return metadata
+
+
+def freeze_execution_baseline(cwd, contract):
+    """在远端执行前冻结仓库提交与 protected 内容。"""
+    tree = Path(cwd)
+    base_sha = git(tree, 'rev-parse', 'HEAD', timeout=5)
+    return {
+        'base_sha': base_sha,
+        'protected_before': snapshot_protected(tree, contract['protected']),
+    }
+
+
+def collect_execution_verification(job, contract, baseline, out, stamp, name):
+    """用共享 core 采集一次 rooms 执行的 delivery 与机器验收证据。"""
+    tree = Path(job['cwd'])
+    out.mkdir(parents=True, exist_ok=True)
+    delivery = collect_git_evidence(
+        tree, baseline['base_sha'], out, stamp, name,
+    )
+    protected = compare_protected(tree, baseline['protected_before'])
+    protected_changed = [item['path'] for item in protected if item['changed']]
+    candidate = []
+    no_change = (
+        delivery['commit'] == '(未提交)' and delivery['diffstat'] == '(无改动)'
+    )
+    if protected_changed:
+        verdict = 'contract-changed'
+    else:
+        candidate = run_checks(tree, contract['verify'])
+        if not all(item['passed'] for item in candidate):
+            verdict = 'refuted'
+        elif contract['mode'] == 'modify' and no_change:
+            verdict = 'no-change'
+        else:
+            verdict = 'verified'
+    evidence = {
+        'contract': contract,
+        'contract_digest': contract_digest(contract),
+        'base_sha': baseline['base_sha'],
+        'mode': contract['mode'],
+        'protected': protected,
+        'candidate': candidate,
+        'baseline': None,
+        'verdict': verdict,
+    }
+    return {'delivery': delivery, 'evidence': evidence}
 
 
 class Discussion:
@@ -261,8 +310,24 @@ class Discussion:
         return job
 
     # 安全不变量：执行 job 只能从外部入口（HTTP/MCP）进来，代码中不存在从成员回复文本到 submit_execute 的任何通路；成员消息处理路径一行都不要碰。
-    def submit_execute(self, room, prompt, executor, key, speaker='master', cwd=None):
-        job = self.store.submit_execute(room, prompt, executor, key, speaker, cwd)
+    def submit_execute(
+        self, room, prompt, executor, key, speaker='master', cwd=None,
+        mode='modify', verify=None, protected=None,
+    ):
+        frozen = freeze_contract(prompt, mode, verify, protected)
+        contract = frozen if verify is not None else None
+        baseline = None
+        if contract is not None:
+            if not cwd:
+                raise ValueError('cwd is required when verify is supplied')
+            cwd = cwd.strip()
+            try:
+                self.store.execution_contract(key)
+            except KeyError:
+                baseline = freeze_execution_baseline(cwd, contract)
+        job = self.store.submit_execute(
+            room, prompt, executor, key, speaker, cwd, contract, baseline,
+        )
         if job['state'] == 'queued' and job['id'] not in self.execute_tasks:
             self._schedule_execute(job['id'])
         return job
@@ -353,6 +418,37 @@ class Discussion:
         job = self.store.job(key)
         attempt = self.store.latest_attempt(key)
         metadata = await asyncio.to_thread(execution_metadata, job, attempt, duration)
+        contract = self.store.execution_contract(key)
+        if state == 'completed' and contract is not None:
+            baseline = self.store.execution_baseline(key)
+            try:
+                if baseline is None:
+                    raise ValueError('execution verification baseline is missing')
+                stamp = time.strftime('%Y%m%d-%H%M%S') + f'-a{attempt_number}'
+                name = hashlib.sha256(key.encode()).hexdigest()[:16]
+                metadata.update(await asyncio.to_thread(
+                    collect_execution_verification,
+                    job,
+                    contract,
+                    baseline,
+                    self.store.path.parent / 'delivery',
+                    stamp,
+                    name,
+                ))
+            except Exception as exc:  # noqa: BLE001 - 验收错误属于结构化证据，不改远端终态
+                detail = str(exc).strip() or type(exc).__name__
+                metadata['delivery'] = {'error': detail}
+                metadata['evidence'] = {
+                    'contract': contract,
+                    'contract_digest': contract_digest(contract),
+                    'base_sha': baseline['base_sha'] if baseline else None,
+                    'mode': contract['mode'],
+                    'protected': [],
+                    'candidate': [],
+                    'baseline': None,
+                    'verdict': 'error',
+                    'error': detail,
+                }
         finished = self.store.finish_execute(key, state, text, error, metadata)
         if finished:
             self.store.set_attempt_state(key, attempt_number, state)
@@ -614,6 +710,9 @@ class ExecuteInput(BaseModel):
     text: str = Field(min_length=1, max_length=50000)
     requestId: str = Field(min_length=1, max_length=100)
     cwd: str | None = None
+    mode: str = Field(default='modify', pattern='^(modify|inspect)$')
+    verify: list[dict] | None = None
+    protected: list[str] | None = None
 
     @field_validator('cwd')
     @classmethod
@@ -624,6 +723,13 @@ class ExecuteInput(BaseModel):
         if not value:
             raise ValueError('cwd must be a nonempty string')
         return value
+
+    @model_validator(mode='after')
+    def validate_verification_contract(self):
+        freeze_contract(self.text, self.mode, self.verify, self.protected)
+        if self.verify is not None and self.cwd is None:
+            raise ValueError('cwd is required when verify is supplied')
+        return self
 
 
 class CheckpointInput(BaseModel):
@@ -739,7 +845,8 @@ def create_app(data=DATA, member_factory=Member, allowed_origins=None):
     async def execute(room: str, body: ExecuteInput):
         # This explicit external entry point is the only route from HTTP into execution.
         return discussion.submit_execute(
-            room, body.text, body.executor, body.requestId, cwd=body.cwd
+            room, body.text, body.executor, body.requestId, cwd=body.cwd,
+            mode=body.mode, verify=body.verify, protected=body.protected,
         )
 
     @app.get('/api/rooms/{room}/context')

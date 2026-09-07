@@ -110,6 +110,7 @@ ExecStart=$DST/venv/bin/python /root/a2a-rooms/roundtable.py
 WorkingDirectory=/root/a2a-rooms
 Environment=HOME=/root
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=/root/a2a-agents
 Environment=A2A_MEMBERS=codex,claude
 Environment=A2A_EXECUTORS=pi=http://127.0.0.1:10000,claude=http://127.0.0.1:10001,codex=http://127.0.0.1:10002,dsh=http://127.0.0.1:10003
 Environment=A2A_ROOM_DATA=/root/a2a-rooms-data
