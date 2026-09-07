@@ -1,6 +1,7 @@
 """在任务 worktree 中执行可复现的机器验收检查。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -16,6 +17,20 @@ def _tail(value: str | bytes | None) -> str:
 
 def _command_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
     return f"stdout:\n{_tail(stdout)}\nstderr:\n{_tail(stderr)}"
+
+
+def contract_digest(contract: dict) -> str:
+    """返回冻结验收合约的稳定摘要。"""
+    canonical = json.dumps(contract, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def file_digest(worktree: Path | str, relative_path: str) -> str:
+    """计算 worktree 内文件摘要；基准中不存在的文件记作 absent。"""
+    path = Path(worktree) / relative_path
+    if not path.exists():
+        return "absent"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def run_checks(worktree: Path | str, checks: list[dict]) -> list[dict]:

@@ -1,5 +1,6 @@
 """dispatch 收口工具回归：worktree 隔离、终态区分、证据来自 git 而非回复文本。"""
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 POSIX_ONLY = unittest.skipIf(os.name == "nt", "verify 用例依赖 /bin/sh（与 test_cancel 同为 POSIX 专用）")
 
@@ -63,7 +65,7 @@ class TestDispatch(unittest.TestCase):
         rows = asyncio.run(run_dispatch(self.repo, tasks, self.out, keep=False, caller=fake_caller))
         by = {r["name"]: r for r in rows}
 
-        self.assertEqual(by["t-ok"]["state"], "ok")
+        self.assertEqual(by["t-ok"]["state"], "delivered")
         self.assertIn("t-ok: add b", by["t-ok"]["commit"])
         patch = Path(by["t-ok"]["patch"]).read_text(encoding="utf-8")
         self.assertIn("+done", patch)
@@ -106,8 +108,10 @@ class TestDispatch(unittest.TestCase):
 
         self.assertEqual(row["state"], "verified")
         evidence = json.loads(Path(row["evidence"]).read_text(encoding="utf-8"))
-        self.assertTrue(evidence[0]["passed"])
-        self.assertEqual(evidence[0]["type"], "command")
+        self.assertTrue(evidence["candidate"][0]["passed"])
+        self.assertTrue(evidence["baseline"][0]["passed"])
+        self.assertEqual(evidence["candidate"][0]["type"], "command")
+        self.assertEqual(evidence["verdict"], "verified")
 
     @POSIX_ONLY
     def test_refuted_writes_evidence_and_log(self):
@@ -124,7 +128,10 @@ class TestDispatch(unittest.TestCase):
             "agent": "codex",
             "name": "refuted",
             "task": "制造验收失败",
-            "verify": [{"type": "command", "argv": ["/bin/sh", "-c", "exit 9"]}],
+            "verify": [{
+                "type": "command",
+                "argv": ["/bin/sh", "-c", "echo acceptance-failed >&2; exit 9"],
+            }],
         }]
         row = asyncio.run(
             run_dispatch(self.repo, tasks, self.out, keep=False, caller=fake_caller)
@@ -132,8 +139,12 @@ class TestDispatch(unittest.TestCase):
 
         self.assertEqual(row["state"], "refuted")
         evidence = json.loads(Path(row["evidence"]).read_text(encoding="utf-8"))
-        self.assertFalse(evidence[0]["passed"])
-        self.assertEqual(Path(row["log"]).read_text(encoding="utf-8").strip(), reply)
+        self.assertFalse(evidence["candidate"][0]["passed"])
+        self.assertIsNone(evidence["baseline"])
+        log = Path(row["log"]).read_text(encoding="utf-8")
+        self.assertIn("acceptance-failed", log)
+        self.assertIn("--- agent 回复摘要 ---", log)
+        self.assertIn(reply, log)
 
     def test_inspect_mode_can_verify_an_unchanged_worktree(self):
         # inspect 模式本就是"检查现状"，不要求改动，verify 全过即 verified。
@@ -172,7 +183,144 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(row["state"], "no-change")
         # 机器验收证据依然写盘，只是不给 verified 判定。
         evidence = json.loads(Path(row["evidence"]).read_text(encoding="utf-8"))
-        self.assertTrue(evidence[0]["passed"])
+        self.assertTrue(evidence["candidate"][0]["passed"])
+        self.assertTrue(evidence["baseline"][0]["passed"])
+        self.assertEqual(evidence["verdict"], "no-change")
+
+    def test_empty_verify_is_rejected_for_modify_and_inspect(self):
+        tasks_path = Path(self.dir.name) / "tasks.json"
+        for mode in ("modify", "inspect"):
+            with self.subTest(mode=mode):
+                tasks_path.write_text(json.dumps([{
+                    "agent": "codex",
+                    "name": f"empty-{mode}",
+                    "task": "不能伪装成已验收",
+                    "mode": mode,
+                    "verify": [],
+                }]), encoding="utf-8")
+                with self.assertRaisesRegex(SystemExit, "verify 不能为空"):
+                    load_tasks(tasks_path)
+
+    def test_protected_paths_are_validated_and_file_checks_are_merged(self):
+        tasks_path = Path(self.dir.name) / "tasks.json"
+        task = {
+            "agent": "codex",
+            "name": "protected",
+            "task": "冻结验收文件",
+            "protected": ["a.txt"],
+            "verify": [{"type": "file", "path": "checks/result.txt"}],
+        }
+        tasks_path.write_text(json.dumps([task]), encoding="utf-8")
+        self.assertEqual(load_tasks(tasks_path)[0]["protected"], ["a.txt", "checks/result.txt"])
+
+        task["protected"] = ["../escape"]
+        tasks_path.write_text(json.dumps([task]), encoding="utf-8")
+        with self.assertRaisesRegex(SystemExit, r"protected\[1\]"):
+            load_tasks(tasks_path)
+
+    @POSIX_ONLY
+    def test_protected_change_short_circuits_checks(self):
+        async def fake_caller(_agent, _prompt, cwd=None, **_kw):
+            tree = Path(cwd)
+            (tree / "a.txt").write_text("tampered\n", encoding="utf-8")
+            _git(tree, "add", "-A")
+            _git(tree, "commit", "-q", "-m", "tamper protected")
+            return "changed contract"
+
+        tasks = [{
+            "agent": "codex",
+            "name": "contract-change",
+            "task": "不应修改验收基准",
+            "protected": ["a.txt"],
+            "verify": [{"type": "command", "argv": ["/bin/sh", "-c", "exit 0"]}],
+        }]
+        with patch("dispatch.run_checks") as mocked_checks:
+            row = asyncio.run(
+                run_dispatch(self.repo, tasks, self.out, keep=False, caller=fake_caller)
+            )[0]
+
+        self.assertEqual(row["state"], "contract-changed")
+        mocked_checks.assert_not_called()
+        evidence = json.loads(Path(row["evidence"]).read_text(encoding="utf-8"))
+        self.assertEqual(evidence["verdict"], "contract-changed")
+        self.assertEqual(evidence["candidate"], [])
+        self.assertTrue(evidence["protected"][0]["changed"])
+
+    @POSIX_ONLY
+    def test_clean_verifier_refutes_unreplayable_validation_tampering(self):
+        (self.repo / ".gitignore").write_text("acceptance.sh\n", encoding="utf-8")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "ignore local acceptance override")
+
+        async def fake_caller(_agent, _prompt, cwd=None, **_kw):
+            tree = Path(cwd)
+            (tree / "feature.txt").write_text("implemented\n", encoding="utf-8")
+            # agent 树里把验收脚本改成恒真；该本地忽略文件不会进入可重放 patch。
+            (tree / "acceptance.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            _git(tree, "add", "-A")
+            _git(tree, "commit", "-q", "-m", "implement with local test override")
+            return "candidate says green"
+
+        tasks = [{
+            "agent": "codex",
+            "name": "clean-verifier",
+            "task": "实现并验收",
+            "verify": [{
+                "type": "command",
+                "argv": ["/bin/sh", "-c", "/bin/sh acceptance.sh"],
+            }],
+        }]
+        row = asyncio.run(
+            run_dispatch(self.repo, tasks, self.out, keep=False, caller=fake_caller)
+        )[0]
+
+        self.assertEqual(row["state"], "refuted")
+        evidence = json.loads(Path(row["evidence"]).read_text(encoding="utf-8"))
+        self.assertTrue(evidence["candidate"][0]["passed"])
+        self.assertFalse(evidence["baseline"][0]["passed"])
+        self.assertEqual(evidence["verdict"], "refuted")
+        self.assertIn("acceptance.sh", evidence["baseline"][0]["output"])
+        log = Path(row["log"]).read_text(encoding="utf-8")
+        self.assertIn("acceptance.sh", log)
+        self.assertIn("candidate says green", log)
+
+    def test_main_treats_no_change_and_contract_changed_as_failures(self):
+        for state in ("no-change", "contract-changed"):
+            with self.subTest(state=state):
+                rows = [{"name": "x", "agent": "codex", "state": state, "detail": state}]
+                with patch("dispatch.load_tasks", return_value=[]), patch(
+                    "dispatch.run_dispatch", new=AsyncMock(return_value=rows),
+                ), redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["repo", "tasks.json"]), 1)
+
+    def test_contract_file_is_written_and_digest_is_stable(self):
+        async def fake_caller(_agent, _prompt, cwd=None, **_kw):
+            tree = Path(cwd)
+            (tree / "b.txt").write_text("done\n", encoding="utf-8")
+            return "done"
+
+        tasks = [{
+            "agent": "codex",
+            "name": "stable-contract",
+            "task": "写文件",
+            "protected": ["a.txt"],
+        }]
+        digests = []
+        for suffix in ("one", "two"):
+            out = Path(self.dir.name) / suffix
+            row = asyncio.run(run_dispatch(self.repo, tasks, out, keep=False, caller=fake_caller))[0]
+            self.assertEqual(row["state"], "delivered")
+            self.assertFalse(list(out.glob("*-evidence.json")))
+            contract = json.loads(next(out.glob("*-contract.json")).read_text(encoding="utf-8"))
+            frozen = contract["tasks"][0]
+            self.assertEqual(frozen["protected_files"][0]["path"], "a.txt")
+            self.assertNotEqual(frozen["protected_files"][0]["sha256"], "absent")
+            canonical = json.dumps(
+                frozen["contract"], sort_keys=True, ensure_ascii=False,
+            ).encode("utf-8")
+            self.assertEqual(frozen["contract_digest"], hashlib.sha256(canonical).hexdigest())
+            digests.append(frozen["contract_digest"])
+        self.assertEqual(digests[0], digests[1])
 
     def test_check_mode_only_validates_tasks(self):
         tasks_path = Path(self.dir.name) / "tasks.json"

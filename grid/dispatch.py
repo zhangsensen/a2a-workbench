@@ -22,7 +22,7 @@ mode 可选，'modify'（默认）要求任务确实产生了 commit 或 diff，
 约定（派活纪律，注入每个任务提示词）：
 - agent 必须在自己的 worktree 里 git commit（改动即提交，可追溯）；
 - 回复末尾必须附验证证据（测试/检查命令的实际输出）。
-无 verify 时，汇总表里的 state=ok 只代表任务终态 COMPLETED；有 verify 时，
+无 verify 时，有改动的成功任务记为 delivered；有 verify 时，
 机器检查全过为 verified，任一失败为 refuted。agent 的完成声明从来不是证据。
 """
 from __future__ import annotations
@@ -30,7 +30,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -41,7 +44,7 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 
 from a2a_call import AgentTaskFailed, call_agent, load_catalog  # noqa: E402
-from verification import run_checks  # noqa: E402
+from verification import contract_digest, file_digest, run_checks  # noqa: E402
 
 Caller = Callable[..., Awaitable[str]]
 
@@ -61,6 +64,43 @@ def _git(repo: Path, *args: str) -> str:
     if result.returncode:
         raise RuntimeError(f"git {' '.join(args)} 失败: {result.stderr.strip()[:500]}")
     return result.stdout.strip()
+
+
+def _rmtree_force(path: Path) -> None:
+    """删除整棵目录树，容忍 Windows 上 git 对象文件的只读位。
+
+    ignore_errors=True 在 Windows 会静默留下 .git/objects 的只读文件
+    （清理断言随之失败）；正确做法是失败时清只读位重试。
+    """
+    def _clear_readonly(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    shutil.rmtree(path, onexc=_clear_readonly)
+
+
+def _valid_relative_path(raw_path: object) -> bool:
+    return (isinstance(raw_path, str) and bool(raw_path) and
+            not Path(raw_path).is_absolute() and ".." not in Path(raw_path).parts)
+
+
+def _protected_paths(task: dict) -> list[str]:
+    """合并显式 protected 与 file 检查路径；集合按路径排序以稳定摘要。"""
+    paths = list(task.get("protected", []))
+    for check in task.get("verify") or []:
+        if check.get("type") == "file":
+            paths.append(check["path"])
+    return sorted(set(paths))
+
+
+def _freeze_contract(task: dict) -> dict:
+    """仅保留会影响验收语义的字段，后续检查不得再读取原始 task。"""
+    return {
+        "task": task["task"],
+        "mode": task.get("mode", "modify"),
+        "verify": task.get("verify"),
+        "protected": _protected_paths(task),
+    }
 
 
 def load_tasks(path: Path) -> list[dict]:
@@ -84,10 +124,24 @@ def load_tasks(path: Path) -> list[dict]:
         mode = task.get("mode", "modify")
         if mode not in {"modify", "inspect"}:
             raise SystemExit(f"任务 {name} 的 mode 不支持：{mode!r}（可选：modify, inspect）")
+        if "protected" in task:
+            protected = task["protected"]
+            if not isinstance(protected, list):
+                raise SystemExit(f"任务 {name} 的 protected 必须是数组")
+            for index, raw_path in enumerate(protected, 1):
+                if not _valid_relative_path(raw_path):
+                    raise SystemExit(
+                        f"任务 {name} 的 protected[{index}] 必须是 worktree 内相对路径"
+                    )
         if "verify" in task:
             checks = task["verify"]
             if not isinstance(checks, list):
                 raise SystemExit(f"任务 {name} 的 verify 必须是数组")
+            if not checks:
+                raise SystemExit(
+                    f"任务 {name} 的 verify 不能为空：要么给真实检查，要么删掉该字段"
+                    "（结果记为 delivered）"
+                )
             for index, check in enumerate(checks, 1):
                 if not isinstance(check, dict):
                     raise SystemExit(f"任务 {name} 的 verify[{index}] 必须是对象")
@@ -102,11 +156,11 @@ def load_tasks(path: Path) -> list[dict]:
                         raise SystemExit(f"任务 {name} 的 verify[{index}].timeout 必须是正数")
                 elif check_type == "file":
                     raw_path = check.get("path")
-                    if (not isinstance(raw_path, str) or not raw_path or
-                            Path(raw_path).is_absolute() or ".." in Path(raw_path).parts):
+                    if not _valid_relative_path(raw_path):
                         raise SystemExit(f"任务 {name} 的 verify[{index}].path 必须是 worktree 内相对路径")
                 else:
                     raise SystemExit(f"任务 {name} 的 verify[{index}].type 不支持：{check_type!r}")
+        task["protected"] = _protected_paths(task)
         seen.add(name)
     return tasks
 
@@ -135,6 +189,16 @@ def init_tasks(path: Path) -> None:
 async def run_dispatch(
     repo: Path, tasks: list[dict], out: Path, keep: bool, caller: Caller = call_agent,
 ) -> list[dict]:
+    frozen_tasks: list[dict] = []
+    for task in tasks:
+        contract = json.loads(json.dumps(_freeze_contract(task), ensure_ascii=False))
+        frozen_tasks.append({
+            "name": task["name"],
+            "agent": task["agent"],
+            "contract": contract,
+            "contract_digest": contract_digest(contract),
+        })
+
     stamp = time.strftime("%Y%m%d-%H%M%S")
     work = out / f"work-{stamp}"
     base = work / "base"
@@ -143,23 +207,60 @@ async def run_dispatch(
     base_sha = _git(base, "rev-parse", "HEAD")
 
     trees: dict[str, Path] = {}
-    for task in tasks:
+    for task in frozen_tasks:
         tree = work / f"wt-{task['name']}"
         _git(base, "worktree", "add", "-q", str(tree), "-b", f"dispatch/{task['name']}")
         trees[task["name"]] = tree
 
+    for task in frozen_tasks:
+        tree = trees[task["name"]]
+        task["protected_before"] = {
+            path: file_digest(tree, path) for path in task["contract"]["protected"]
+        }
+
+    contract_path = out / f"{stamp}-contract.json"
+    contract_document = {
+        "base_sha": base_sha,
+        "tasks": [{
+            "name": task["name"],
+            "agent": task["agent"],
+            "contract_digest": task["contract_digest"],
+            "contract": task["contract"],
+            "protected_files": [
+                {"path": path, "sha256": digest}
+                for path, digest in task["protected_before"].items()
+            ],
+        } for task in frozen_tasks],
+    }
+    contract_path.write_text(
+        json.dumps(contract_document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+
+    verifier_trees: dict[str, Path] = {}
+    verifier_tree_lock = asyncio.Lock()
+
     async def one(task: dict) -> dict:
         name, tree = task["name"], trees[task["name"]]
-        prompt = f"任务 {name}：{task['task']}" + DISCIPLINE
-        row = {"name": name, "agent": task["agent"], "state": "ok", "detail": ""}
+        contract = task["contract"]
+        prompt = f"任务 {name}：{contract['task']}" + DISCIPLINE
+        row = {
+            "name": name,
+            "agent": task["agent"],
+            "state": "delivered",
+            "detail": "",
+            "contract": str(contract_path),
+        }
         print(f"[进度] {name} 开始 (agent={task['agent']})", flush=True)
 
-        def write_failure_log(text: str) -> None:
+        def write_failure_log_sync(text: str) -> str:
             log = out / f"{stamp}-{name}.log"
             log.write_text(text + ("\n" if text and not text.endswith("\n") else ""), encoding="utf-8")
-            row["log"] = str(log)
+            return str(log)
 
-        def collect_evidence(row: dict, tree: Path) -> None:
+        async def write_failure_log(text: str) -> None:
+            row["log"] = await asyncio.to_thread(write_failure_log_sync, text)
+
+        def collect_evidence_sync() -> dict:
             """收集 commit/diff/patch 证据，全部来自文件系统与 git，不信任
             回复文本。无论任务终态如何都可调用——失败分支也不该丢掉 agent
             已完成的部分工作（commit、未提交 diff、新文件）。先 git add -A
@@ -167,74 +268,157 @@ async def run_dispatch(
             所有，这一步是安全的；diff 改用 --cached 使新文件正文（而不只是
             文件名）进入 patch。"""
             _git(tree, "add", "-A")
-            row["commit"] = _git(tree, "log", "--oneline", f"{base_sha}..HEAD") or "(未提交)"
+            commit = _git(tree, "log", "--oneline", f"{base_sha}..HEAD") or "(未提交)"
             diff = _git(tree, "diff", "--cached", base_sha)
-            row["diffstat"] = _git(tree, "diff", "--cached", "--stat", base_sha) or "(无改动)"
+            diffstat = _git(tree, "diff", "--cached", "--stat", base_sha) or "(无改动)"
             patch = out / f"{stamp}-{name}.patch"
             patch.write_text(
                 diff + ("\n" if diff and not diff.endswith("\n") else ""), encoding="utf-8",
             )
-            row["patch"] = str(patch)
+            return {"commit": commit, "diffstat": diffstat, "patch": str(patch)}
+
+        def compare_protected_sync() -> list[dict]:
+            changes = []
+            for path, before in task["protected_before"].items():
+                after = file_digest(tree, path)
+                changes.append({
+                    "path": path,
+                    "before": before,
+                    "after": after,
+                    "changed": before != after,
+                })
+            return changes
+
+        def write_evidence_sync(evidence: dict) -> str:
+            evidence_path = out / f"{stamp}-{name}-evidence.json"
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
+            return str(evidence_path)
+
+        def prepare_clean_verifier_sync(verifier_tree: Path) -> None:
+            _git(base, "worktree", "add", "-q", "--detach", str(verifier_tree), base_sha)
+            patch = Path(row["patch"])
+            if patch.stat().st_size:
+                _git(verifier_tree, "apply", str(patch))
+            for path, before in task["protected_before"].items():
+                target = verifier_tree / path
+                if before == "absent":
+                    if target.is_symlink() or target.is_file():
+                        target.unlink()
+                    elif target.exists():
+                        shutil.rmtree(target)
+                else:
+                    _git(
+                        verifier_tree, "--literal-pathspecs", "checkout", base_sha, "--", path,
+                    )
+
+        def refuted_log(evidence: dict) -> str:
+            outputs = [
+                item.get("output", "")
+                for side in (evidence["candidate"], evidence["baseline"] or [])
+                for item in side
+                if not item.get("passed", False)
+            ]
+            body = "\n".join(outputs)
+            if body and not body.endswith("\n"):
+                body += "\n"
+            return body + "--- agent 回复摘要 ---\n" + row.get("reply_tail", "")
 
         try:
             reply = await caller(task["agent"], prompt, cwd=str(tree))
             row["reply_tail"] = reply[-800:]
         except AgentTaskFailed as failure:
             row.update(state="failed", detail=f"[{failure.state}] {failure.text[:500]}")
-            write_failure_log(failure.text)
+            await write_failure_log(failure.text)
             try:
-                collect_evidence(row, tree)
+                row.update(await asyncio.to_thread(collect_evidence_sync))
             except Exception:  # noqa: BLE001 —— 收集失败不覆盖原失败状态，静默降级
                 pass
         except Exception as exc:  # noqa: BLE001
             error_text = f"{type(exc).__name__}: {exc}"
             row.update(state="error", detail=error_text[:500])
-            write_failure_log(error_text)
+            await write_failure_log(error_text)
             try:
-                collect_evidence(row, tree)
+                row.update(await asyncio.to_thread(collect_evidence_sync))
             except Exception:  # noqa: BLE001 —— 同上，静默降级
                 pass
         else:
             try:
-                collect_evidence(row, tree)
-                mode = task.get("mode", "modify")
+                row.update(await asyncio.to_thread(collect_evidence_sync))
+                mode = contract["mode"]
                 no_change = row["commit"] == "(未提交)" and row["diffstat"] == "(无改动)"
-                if "verify" in task:
-                    evidence = run_checks(tree, task["verify"])
-                    evidence_path = out / f"{stamp}-{name}-evidence.json"
-                    evidence_path.write_text(
-                        json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
-                    )
-                    row["evidence"] = str(evidence_path)
-                    if not all(item["passed"] for item in evidence):
+                protected = await asyncio.to_thread(compare_protected_sync)
+                contract_changed = any(item["changed"] for item in protected)
+
+                if contract_changed:
+                    row.update(state="contract-changed", detail="protected 文件与冻结合约不一致")
+                    if contract["verify"] is not None:
+                        evidence = {
+                            "contract_digest": task["contract_digest"],
+                            "mode": mode,
+                            "protected": protected,
+                            "candidate": [],
+                            "baseline": None,
+                            "verdict": "contract-changed",
+                        }
+                        row["evidence"] = await asyncio.to_thread(
+                            write_evidence_sync, evidence,
+                        )
+                elif contract["verify"] is None:
+                    if no_change:
+                        row.update(state="no-change", detail="任务完成但没有任何文件改动")
+                    else:
+                        row["state"] = "delivered"
+                else:
+                    candidate = await asyncio.to_thread(run_checks, tree, contract["verify"])
+                    baseline = None
+                    verdict = "refuted"
+                    if all(item["passed"] for item in candidate):
+                        verifier_tree = work / f"wt-{name}-verify"
+                        verifier_trees[name] = verifier_tree
+                        async with verifier_tree_lock:
+                            await asyncio.to_thread(prepare_clean_verifier_sync, verifier_tree)
+                        baseline = await asyncio.to_thread(
+                            run_checks, verifier_tree, contract["verify"],
+                        )
+                        if all(item["passed"] for item in baseline):
+                            verdict = "no-change" if mode == "modify" and no_change else "verified"
+
+                    evidence = {
+                        "contract_digest": task["contract_digest"],
+                        "mode": mode,
+                        "protected": protected,
+                        "candidate": candidate,
+                        "baseline": baseline,
+                        "verdict": verdict,
+                    }
+                    row["evidence"] = await asyncio.to_thread(write_evidence_sync, evidence)
+                    if verdict == "refuted":
                         row.update(state="refuted", detail="机器验收失败")
-                        write_failure_log(row.get("reply_tail", ""))
-                    elif mode == "modify" and no_change:
+                        await write_failure_log(refuted_log(evidence))
+                    elif verdict == "no-change":
                         row.update(
                             state="no-change",
                             detail="modify 模式要求实质改动：verify 全过但无 commit 无 diff",
                         )
                     else:
                         row["state"] = "verified"
-                elif no_change:
-                    row.update(state="no-change", detail="任务完成但没有任何文件改动")
             except Exception as exc:  # noqa: BLE001
                 error_text = f"{type(exc).__name__}: {exc}"
                 row.update(state="error", detail=error_text[:500])
-                write_failure_log(error_text)
+                await write_failure_log(error_text)
         finally:
             print(f"[进度] {name} → {row['state']}", flush=True)
         return row
 
-    rows = await asyncio.gather(*(one(t) for t in tasks))
+    rows = await asyncio.gather(*(one(t) for t in frozen_tasks))
 
     if not keep:
-        for tree in trees.values():
+        for tree in [*verifier_trees.values(), *trees.values()]:
             subprocess.run(["git", "-C", str(base), "worktree", "remove", "--force", str(tree)],
                            capture_output=True, timeout=120)
-        subprocess.run(["rm", "-rf", str(work)] if sys.platform != "win32" else
-                       ["cmd", "/c", "rmdir", "/s", "/q", str(work)],
-                       capture_output=True, timeout=120)
+        _rmtree_force(work)
     return list(rows)
 
 
@@ -272,7 +456,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{'任务':<16}{'agent':<8}{'终态':<10}摘要")
     failed = False
     for row in rows:
-        failed |= row["state"] in {"failed", "error", "refuted"}
+        failed |= row["state"] in {
+            "failed", "error", "refuted", "no-change", "contract-changed",
+        }
         summary = row.get("detail") or row.get("commit", "")
         print(f"{row['name']:<16}{row['agent']:<8}{row['state']:<10}{summary[:80]}")
         if row.get("diffstat"):
