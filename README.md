@@ -4,7 +4,7 @@
 
 Connect Claude Code, Codex, ZCode, and other agent runtimes through persistent, topic-scoped rooms. A coordinating model can consult peers, preserve context across sessions, track disagreements, and hand work forward without turning every participant into its private subagent.
 
-[中文说明](README.zh-CN.md) · [Master workflow](MASTER.md) · [Operations](OPERATIONS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+[中文说明](README.zh-CN.md) · [Changelog](CHANGELOG.md) · [Design references](REFERENCES.md) · [Master workflow](MASTER.md) · [Operations](OPERATIONS.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
 
 > **Current release:** persistent collaboration rooms over MCP, HTTP, and A2A 1.0 are implemented. Isolated worktree execution and machine-verified delivery are the next product layer and are not claimed as part of the current public release.
 
@@ -24,6 +24,33 @@ A2A Workbench provides a durable collaboration layer:
 The project’s north star is simple:
 
 > Reduce the total time and human coordination needed to turn one goal into a verified engineering result.
+
+## Problems it solves
+
+| Problem | Workbench response |
+|---|---|
+| Context is repeatedly copied between independent agent sessions | Room-scoped event streams, unread cursors, and resumable native conversations |
+| A parent agent must own and recreate every helper as a private subagent | Independent peers keep their own identity and runtime; the calling model coordinates them through MCP/A2A |
+| Long discussions lose decisions and unresolved objections | Revision-checked master checkpoints preserve goals, summaries, open questions, and next actions |
+| Retries can trigger duplicate model work | Stable request IDs make exact retries idempotent and reject changed payloads |
+| A restart can silently repeat an uncertain model turn | Running turns become `interrupted`; recorded replies remain inspectable and replay requires a new explicit decision |
+| Multiple topics leak context into one another | Rooms validate event cursors, task ownership, and native-session ownership before provider input and persistence |
+| A receipt or model claim is mistaken for a result | Jobs expose explicit states and recorded replies; the master must read the terminal result before reporting |
+
+A2A Workbench does not replace the coding agents, their subscriptions, or their native context systems. It coordinates the clients the user already operates.
+
+## Version status
+
+The public package is currently **v0.3.0**. The repository was renamed from **A2A Roundtable** to **A2A Workbench** on 2026-09-07; compatibility identifiers remain unchanged in v0.3.x.
+
+| Version | Milestone |
+|---|---|
+| `v0.1` | Initial local A2A discussion prototype |
+| `v0.2` | Persistent multi-room host, isolated native sessions, HTTP/MCP/A2A surfaces, recovery and room-boundary tests |
+| `v0.3` | Master-led single-peer consultations, revisioned room checkpoints, pagination, exact retry semantics, and improved cancellation/recovery |
+| Next | Isolated worktree execution and machine-verified delivery, after those capabilities are transferred into the public repository and independently validated |
+
+See [CHANGELOG.md](CHANGELOG.md) for release details. Until a tagged release is published, `main` is the source of truth for v0.3.x.
 
 ## What is implemented today
 
@@ -211,6 +238,17 @@ Offline tests use fake members and require no model subscription. Optional real-
 uv run python native_acceptance.py
 uv run python native_room_acceptance.py
 ```
+
+## Design references
+
+The design was informed by several open-source projects, while the implementation in this repository was written independently:
+
+- [A2A Protocol](https://github.com/a2aproject/A2A) — standard Agent Card discovery, task lifecycle, messages, artifacts, and transports.
+- [Claw Orchestrator](https://github.com/Enderfga/claw-orchestrator) — persistent programmable CLI sessions and multi-engine orchestration.
+- [Agent Room](https://github.com/agent-room-alkl/agent-room) — shared rooms, explicit collaboration turns, and durable project context.
+- [Peertable](https://github.com/kitepon/peertable) — long-lived peers and retained room history.
+
+A2A Workbench deliberately differs by keeping the user-facing model as the master, preserving one native conversation per room/member, and treating peer messages as discussion rather than execution authority. See [REFERENCES.md](REFERENCES.md) for the detailed adopted/rejected design choices and license notes.
 
 ## Product direction
 

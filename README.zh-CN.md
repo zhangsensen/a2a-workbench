@@ -2,7 +2,7 @@
 
 **让彼此独立的 Coding Agent 持续协作，而不是被锁在某个主 Agent 的私有 subagent 树里。**
 
-[English](README.md) · [Master 主持流程](MASTER.md) · [运行说明](OPERATIONS.md) · [安全边界](SECURITY.md) · [参与贡献](CONTRIBUTING.md)
+[English](README.md) · [版本记录](CHANGELOG.md) · [设计参照](REFERENCES.md) · [Master 主持流程](MASTER.md) · [运行说明](OPERATIONS.md) · [安全边界](SECURITY.md) · [参与贡献](CONTRIBUTING.md)
 
 > **当前公开版本：** 已实现基于 MCP、HTTP 和标准 A2A 1.0 的持久协作房间。隔离 worktree 执行和机器验证交付是下一层产品能力，尚未作为当前公开版本的已交付功能宣传。
 
@@ -22,6 +22,33 @@ A2A Workbench 提供一层持久协作基础：
 项目的北极星只有一个：
 
 > **减少从一个目标到经过验收的工程结果所需的总时间和人工协调。**
+
+## 解决的问题
+
+| 问题 | Workbench 的处理方式 |
+|---|---|
+| 独立 Agent 会话之间反复复制上下文 | 房间事件流、成员未读游标和可恢复的原生会话 |
+| 主 Agent 必须私有创建并持有所有 subagent | Peer 保持独立身份与运行时，当前 Master 通过 MCP/A2A 组织协作 |
+| 长讨论容易丢失决定和未解决分歧 | 带 revision 的 Master 检查点保存目标、摘要、问题和下一步 |
+| 网络重试可能重复调用模型 | 稳定 requestId 使完全相同的重试幂等，不同内容复用同 ID 会被拒绝 |
+| 服务重启可能重复一个结果不确定的模型轮次 | 运行中任务变为 `interrupted`，保留已记录回答，不静默重放 |
+| 多个议题之间发生上下文串线 | 在模型输入和结果落盘前校验房间、游标、任务和原生会话归属 |
+| 把回执或模型自述误当成结果 | Job 暴露明确状态和实际回复；Master 必须读取终态后才能汇报 |
+
+A2A Workbench 不替代 Coding Agent、模型订阅或它们自己的上下文系统，而是协调用户已经在使用的客户端。
+
+## 版本状态
+
+当前公开包版本为 **v0.3.0**。仓库于 2026-09-07 从 **A2A Roundtable** 改名为 **A2A Workbench**；v0.3.x 暂时保留旧内部标识以兼容已有安装。
+
+| 版本 | 里程碑 |
+|---|---|
+| `v0.1` | 最初的本地 A2A 讨论原型 |
+| `v0.2` | 持久多房间 Host、原生会话隔离、HTTP/MCP/A2A 接口、重启恢复和房间边界测试 |
+| `v0.3` | Master 单 Peer 咨询、带 revision 的房间检查点、分页、精确重试语义，以及更完整的取消和恢复 |
+| 下一层 | 隔离 worktree 执行与机器验证交付；迁入公开仓库并完成独立验收后才作为已交付功能发布 |
+
+版本详情见 [CHANGELOG.md](CHANGELOG.md)。正式 tag 发布前，`main` 是 v0.3.x 的事实来源。
 
 ## 当前已实现
 
@@ -207,6 +234,17 @@ python3 scripts/check_publication.py --worktree
 uv run python native_acceptance.py
 uv run python native_room_acceptance.py
 ```
+
+## 设计参照
+
+设计过程中参考了以下开源项目，但本仓库实现为独立编写：
+
+- [A2A Protocol](https://github.com/a2aproject/A2A)：Agent Card 发现、任务生命周期、消息、Artifact 和标准传输。
+- [Claw Orchestrator](https://github.com/Enderfga/claw-orchestrator)：持久 CLI 会话和多执行引擎编排。
+- [Agent Room](https://github.com/agent-room-alkl/agent-room)：共享房间、明确协作轮次和项目上下文。
+- [Peertable](https://github.com/kitepon/peertable)：长寿命 Peer 与保留的房间历史。
+
+Workbench 的明确取舍是：当前与用户对话的模型担任 Master；每个房间/成员保留独立原生会话；Peer 发言只构成讨论，不构成执行授权。详细采纳、拒绝项及许可证说明见 [REFERENCES.md](REFERENCES.md)。
 
 ## 产品方向
 

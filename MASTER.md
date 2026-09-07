@@ -54,12 +54,8 @@ At the next visit, `roundtable_context` returns this checkpoint and subsequent e
 - Revision checks prevent stale checkpoint overwrites; they are not multi-user authentication or an exclusive master lease. Coordinate one active master per room. Distinct topics use distinct rooms.
 - The service still runs one global serial generation queue. Separate rooms can queue work but do not generate concurrently.
 
-## Ideas adopted from other projects
+## Design references
 
-Primary repository documentation reviewed on 2026-09-05:
-
-- [Claw Orchestrator](https://github.com/Enderfga/claw-orchestrator): persistent CLI sessions and model orchestration. Here the calling master selects the next consultation, while the server retains sessions and task state.
-- [Agent Room](https://github.com/agent-room-alkl/agent-room): project memory and explicit turn discipline. Here the master saves per-room progress and asks one peer at a time. No mandatory message tags or user-facing task board.
-- [Peertable](https://github.com/kitepon/peertable): long-lived participants and retained room history. Its equal-peer leadership model is not adopted; the user wants one master to lead.
+The collaboration model was informed by the A2A Protocol, Claw Orchestrator, Agent Room, and Peertable. See [REFERENCES.md](REFERENCES.md) for adopted ideas, deliberate differences, license notes, and attribution boundaries.
 
 These ideas were implemented independently; no upstream source code or additional dependency was copied. This is not a claim of superior reliability, cost, or reasoning quality. Offline tests validate tool routing, single-peer scheduling, checkpoint isolation, pagination, retry, restart, and cancellation. Real master judgment and provider compatibility require separate real-model acceptance.
