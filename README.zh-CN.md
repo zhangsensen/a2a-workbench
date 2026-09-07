@@ -48,7 +48,7 @@ PatchCrew 不替代 Coding Agent、模型订阅或它们自己的上下文系统
 | `v0.3` | Master 单 Peer 咨询、带 revision 的房间检查点、分页、精确重试语义，以及更完整的取消和恢复 |
 | 下一层 | 隔离 worktree 执行与机器验证交付；迁入公开仓库并完成独立验收后才作为已交付功能发布 |
 
-版本详情见 [CHANGELOG.md](CHANGELOG.md)。正式 tag 发布前，`main` 是 v0.3.x 的事实来源。
+版本详情见 [CHANGELOG.md](CHANGELOG.md) 和 [v0.3.0 Release](https://github.com/zhangsensen/patchcrew/releases/tag/v0.3.0)。
 
 ## 当前已实现
 

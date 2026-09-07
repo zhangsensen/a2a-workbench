@@ -50,7 +50,7 @@ The public package is currently **v0.3.0**. The project began as **A2A Roundtabl
 | `v0.3` | Master-led single-peer consultations, revisioned room checkpoints, pagination, exact retry semantics, and improved cancellation/recovery |
 | Next | Isolated worktree execution and machine-verified delivery, after those capabilities are transferred into the public repository and independently validated |
 
-See [CHANGELOG.md](CHANGELOG.md) for release details. Until a tagged release is published, `main` is the source of truth for v0.3.x.
+See [CHANGELOG.md](CHANGELOG.md) and the [v0.3.0 release](https://github.com/zhangsensen/patchcrew/releases/tag/v0.3.0) for release details.
 
 ## What is implemented today
 

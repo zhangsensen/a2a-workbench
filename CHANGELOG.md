@@ -12,13 +12,14 @@ PatchCrew follows semantic versioning for public releases. The project was origi
 
 ## Unreleased
 
+## 0.3.0 — 2026-09-07
+
+First formal GitHub release under the **PatchCrew** name.
+
 - Renamed the product and repository to **PatchCrew**.
 - Reframed the documentation around open collaboration between independent coding agents.
 - Documented the product problem, design references, current delivery boundary, and next verified-delivery layer.
 - Retained the `a2a-roundtable` Python distribution and macOS LaunchAgent label for v0.3.x compatibility; new MCP configurations and user-facing service metadata use `patchcrew` / PatchCrew.
-
-## 0.3.0 — 2026-09-05
-
 - Added master-led adaptive consultations: the calling model selects one persistent peer per question and decides whether to continue.
 - Added room-scoped master checkpoints containing goal, summary, unresolved questions, next action, and the last consumed event sequence.
 - Added revision checks, exact retry handling, and pagination for room recovery.
