@@ -288,6 +288,25 @@ class SubprocessAgentExecutor(AgentExecutor):
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
+    # 诊断文本的截断必须保留尾部：CLI 的输出顺序是 banner → prompt 回显 →
+    # 错误信息，只留头部会把唯一的失败原因丢掉。红队实测代价：codex 连续两轮
+    # 任务失败（退出码 1），日志里只有 banner 和被截断的 prompt，无法诊断。
+    DIAG_HEAD = 300
+    DIAG_TAIL = 1500
+
+    @classmethod
+    def _clip_diagnostic(cls, text: str) -> str:
+        """按头尾保留裁剪诊断文本，中间省略并显式标注省略量。"""
+        limit = cls.DIAG_HEAD + cls.DIAG_TAIL
+        if len(text) <= limit:
+            return text
+        omitted = len(text) - limit
+        return (
+            text[: cls.DIAG_HEAD]
+            + f"\n...[中间省略 {omitted} 个字符]...\n"
+            + text[-cls.DIAG_TAIL :]
+        )
+
     @classmethod
     def _clip_output(cls, text: str) -> str:
         """裁剪超长输出，但显式标注，不静默截断。"""
@@ -429,20 +448,25 @@ class SubprocessAgentExecutor(AgentExecutor):
         # 把它当成功答案返回会让调用方拿着半截结果继续走（旧行为，真 bug）。
         if proc.returncode:
             failure_type = ExecutorFailure
-            combined_output = f"{stdout_text}\n{stderr_text}".lower()
             is_resume = bool(
                 self.RESUME_FLAG
                 and extra_args
                 and self.RESUME_FLAG in extra_args
             )
+            # 只在 stderr（CLI 自己的诊断通道）里按行匹配会话丢失特征。
+            # 绝不能把 stdout 纳入匹配：那是 agent 生成的内容，一个正在修改
+            # 会话相关代码、或被提示注入的 agent 只要打印出 "session not found"
+            # 就能让整个任务换新会话重跑一遍，产生重复副作用——这正是
+            # "只对明确的会话丢失重试" 要防的事。
             if is_resume and any(
-                marker in combined_output
+                marker in line.strip().lower()
+                for line in stderr_text.splitlines()
                 for marker in self._SESSION_NOT_FOUND_MARKERS
             ):
                 failure_type = SessionNotFound
             raise failure_type(
-                f"(退出码 {proc.returncode}) stderr: {err[:1000]}\n"
-                f"stdout: {out[:2000]}"
+                f"(退出码 {proc.returncode}) stderr: {self._clip_diagnostic(stderr_text)}\n"
+                f"stdout: {self._clip_diagnostic(stdout_text)}"
             )
         if out:
             return out
@@ -533,6 +557,12 @@ class SubprocessAgentExecutor(AgentExecutor):
                 task.id,
                 entry,
             )
+        except asyncio.CancelledError:
+            # CancelledError 继承 BaseException，不会被下面的 except Exception
+            # 捕获。不在这里取回条目，运行表就会随每次协程取消无界增长，
+            # 并让后续对同一 task_id 的 cancel 拿到僵尸条目、写出虚假终态。
+            self._take_process(task.id, expected=entry)
+            raise
         except ExecutorFailure as failure:
             if self._take_process(task.id, expected=entry) is None:
                 return

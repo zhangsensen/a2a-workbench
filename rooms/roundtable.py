@@ -79,7 +79,9 @@ def task_text(task):
 
 async def call_executor(url, prompt, room, cwd=None, on_task_id=None):
     started = time.monotonic()
-    http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    # 读超时比执行手的 600s TIMEOUT 多 60s 宽限：两者相等时真超时会让本端与
+    # 远端同时放弃，job 只能落成不透明的通信异常，拿不到执行手诚实的超时终态。
+    http = httpx.AsyncClient(timeout=httpx.Timeout(660.0, connect=10.0))
     client = None
     try:
         card = await A2ACardResolver(httpx_client=http, base_url=url).get_agent_card()

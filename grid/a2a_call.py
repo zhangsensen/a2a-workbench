@@ -38,6 +38,10 @@ from a2a.types import Role, SendMessageRequest, TaskState
 BASE = Path(__file__).resolve().parent
 CATALOG = BASE / "agents.json"
 
+# 执行器侧 TIMEOUT=600s；客户端多给 60s 宽限，让服务端的终态先落地。
+EXECUTOR_TIMEOUT = 600.0
+CLIENT_READ_TIMEOUT = EXECUTOR_TIMEOUT + 60.0
+
 # 成功白名单：只有 COMPLETED 算成功。之前用的是"FAILED/CANCELED 才算失败"的
 # 黑名单，任何新增或未预料的状态（REJECTED、INPUT_REQUIRED、AUTH_REQUIRED，以及
 # 协议不完整导致的 WORKING/None）都会被当成成功返回——编排方据此继续推进就是
@@ -113,7 +117,10 @@ async def call_agent(
         raise SystemExit(f"未注册的 agent：{name}，可选：{[a['name'] for a in catalog['agents']]}")
 
     base_url = f"http://127.0.0.1:{target['port']}"
-    hc = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    # 客户端读超时必须比执行器的 TIMEOUT（600s）更长：两者相等时真超时会让
+    # 客户端与服务端同时放弃，调用方拿到不透明的 A2AClientTimeoutError，而不是
+    # 服务端诚实的 "(调用超时 >600s)" FAILED 终态（可取回、有原因）。
+    hc = httpx.AsyncClient(timeout=httpx.Timeout(CLIENT_READ_TIMEOUT, connect=10.0))
     try:
         card = await A2ACardResolver(httpx_client=hc, base_url=base_url).get_agent_card()
         client = await create_client(
