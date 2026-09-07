@@ -19,7 +19,9 @@ a2a-workbench/
 └── deploy-to-wsl.sh   唯一部署通道（grid → WSL /root/a2a-agents）
 ```
 
-两个子系统各自完整、互不 import；融合发生在 A2A 协议层，不在代码层。
+运行时融合发生在 A2A 协议层（讨论席与执行手仍是独立进程、独立权限域）；
+代码层自 2026-09-07 起共享 `grid/workbench_core/`（workspace/delivery/verification 三个纯模块），
+rooms 复用它实现执行链路的同一套证据语义——共享的是"收口逻辑"，不是运行时耦合。
 
 ## 运行形态（当前）
 
